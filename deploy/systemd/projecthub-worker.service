@@ -1,0 +1,29 @@
+[Unit]
+Description=ChitoProject durable message worker
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=projecthub
+Group=projecthub
+WorkingDirectory=/opt/projecthub/app
+EnvironmentFile=/etc/projecthub/projecthub.env
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+ExecStart=/opt/projecthub/venv/bin/python -m app.worker_entry
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/projecthub/uploads
+
+[Install]
+WantedBy=multi-user.target
