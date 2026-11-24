@@ -24,7 +24,7 @@ from app.models import (
     now_utc,
 )
 
-logger = logging.getLogger("projecthub.worker")
+logger = logging.getLogger("chitoproject.worker")
 MAX_ATTEMPTS = 12
 INBOX_LEASE = timedelta(minutes=5)
 OUTBOX_LEASE = timedelta(minutes=3)

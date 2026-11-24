@@ -29,7 +29,7 @@ from app.models import (
 from app.permissions import Role, has_permission
 from app.security import digest_token, now_utc
 
-logger = logging.getLogger("projecthub.bot")
+logger = logging.getLogger("chitoproject.bot")
 MAX_TEXT_CHARS = 5000
 MAX_FILES_PER_PROJECT = 5
 MAX_TOTAL_UPLOAD_BYTES = settings.max_upload_mb * 1024 * 1024
@@ -412,7 +412,7 @@ async def _clear_chat(db: AsyncSession, conversation: Conversation, update: dict
     conversation.state = "home"
     conversation.ui_message_id = None
     await _queue_ui(db, conversation,
-                    "درخواست پاک‌سازی صفحه ثبت شد. حذف پیام‌ها در خود پیام‌رسان انجام می‌شود و نسخهٔ مدیریتی برای پیگیری درخواست‌ها نگهداری می‌شود.",
+                    "درخواست پاک‌سازی صفحه ثبت شد. پیام‌های قابل‌حذف از گفتگو پاک می‌شوند و سوابق لازم برای پیگیری تیم حفظ خواهد شد.",
                     [[_button("ادامه", "c:home")]], update, force_send=True)
     provider_ids = list((await db.scalars(select(ConversationMessage.provider_message_id).where(
         ConversationMessage.conversation_id == conversation.id,
@@ -781,7 +781,7 @@ async def _create_project(db: AsyncSession, conversation: Conversation, customer
         await _show_home(db, conversation, update, notice="اطلاعات فرم کامل نبود؛ درخواست را دوباره ثبت کن.")
         return
     project = Project(
-        public_id=f"PH-{uuid4().hex[:12].upper()}", customer_id=customer_id,
+        public_id=f"CP-{uuid4().hex[:12].upper()}", customer_id=customer_id,
         conversation_id=conversation.id, title=str(draft["title"])[:180],
         description=str(draft["description"])[:MAX_TEXT_CHARS],
         deadline_note=str(draft.get("deadline_note", ""))[:120],

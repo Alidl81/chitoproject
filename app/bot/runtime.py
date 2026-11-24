@@ -13,7 +13,7 @@ from app.config import settings
 from app.database import SessionLocal
 from app.models import IncomingUpdate, PollerLease, now_utc
 
-logger = logging.getLogger("projecthub.poller")
+logger = logging.getLogger("chitoproject.poller")
 
 
 def _aware(value: datetime) -> datetime:
