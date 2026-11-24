@@ -5,13 +5,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=projecthub
-Group=projecthub
-WorkingDirectory=/opt/projecthub/app
-EnvironmentFile=/etc/projecthub/projecthub.env
+User=chitoproject
+Group=chitoproject
+WorkingDirectory=/opt/chitoproject/app
+EnvironmentFile=/etc/chitoproject/chitoproject.env
 Environment=PYTHONUNBUFFERED=1
 UMask=0077
-ExecStart=/opt/projecthub/venv/bin/python -m app.worker_entry
+ExecStart=/opt/chitoproject/venv/bin/python -m app.worker_entry
 Restart=always
 RestartSec=3
 NoNewPrivileges=true
@@ -23,7 +23,7 @@ ProtectControlGroups=true
 RestrictRealtime=true
 LockPersonality=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-ReadWritePaths=/var/lib/projecthub/uploads
+ReadWritePaths=/var/lib/chitoproject/uploads
 
 [Install]
 WantedBy=multi-user.target

@@ -1,1 +1,1 @@
-"""ProjectHub application package."""
+"""ChitoProject application package."""

@@ -1,74 +1,78 @@
 # استقرار روی VPS
 
-## نصب خودکار
+## نصب تازه روی Ubuntu 24.04
 
-نصب‌کننده برای Ubuntu 24.04 LTS نوشته شده و Python 3.12 را از بسته‌های سیستم نصب می‌کند. دامنه باید به IP سرور اشاره کند و پورت‌های SSH و HTTPS در دسترس باشند. برای نسخه‌های دیگر Debian/Ubuntu، ابتدا وجود بسته‌های `python3.12` و `python3.12-venv` را بررسی کنید.
+این دستورها برای نصب تازه هستند. نصب‌کننده در صورت وجود مسیرهای برنامه، داده، تنظیمات، سرویس یا نصب Caddy متوقف می‌شود؛ مسیرهای موجود را حذف نکنید. در صورت وجود نقش یا پایگاه‌دادهٔ PostgreSQL با نام chitoproject نیز نصب متوقف می‌شود؛ چون این بررسی پس از نصب بسته‌ها انجام می‌شود، ممکن است پیش از توقف بخشی از نصب اولیه انجام شده باشد. پیش از نصب، نسخهٔ پشتیبان و شرایط سرور را بررسی کنید. اگر نصب نیمه‌کاره شد، آن را پاک نکنید؛ ابتدا علت و داده‌های موجود را بررسی کنید.
 
-اگر مخزن GitHub خصوصی است، پیش از اجرای نصب‌کننده یک Deploy Key فقط‌خواندنی بسازید و کلید عمومی را به همان repository اضافه کنید. سپس کلید خصوصی را از مسیر امن به VPS منتقل و برای کاربر سرویس نصب کنید؛ کلید را در خود مخزن یا فرمان shell قرار ندهید:
-
-```bash
-sudo useradd --system --home-dir /opt/projecthub --create-home --shell /usr/sbin/nologin projecthub
-sudo install -d -o projecthub -g projecthub -m 0700 /opt/projecthub/.ssh
-sudo install -o projecthub -g projecthub -m 0600 /path/to/deploy_key /opt/projecthub/.ssh/id_ed25519
-```
-
-کلید میزبان GitHub را از منبع رسمی و با fingerprint منتشرشدهٔ GitHub بررسی کنید. بعد از تطبیق fingerprint، کلید میزبان را ثبت و دسترسی را پیش از نصب بررسی کنید:
+برای مخزن خصوصی باید **کلید اختصاصی فقط‌خواندنی متعلق به کاربر سرویس** ساخته شود. بخش‌های زیر را روی VPS اجرا کنید. اگر کاربر یا فایل‌های SSH از قبل موجودند، قبل از تغییر آنها را بررسی کنید.
 
 ```bash
-sudo -u projecthub ssh-keyscan -t ed25519 github.com | sudo tee -a /opt/projecthub/.ssh/known_hosts >/dev/null
-sudo chown projecthub:projecthub /opt/projecthub/.ssh/known_hosts
-sudo chmod 0600 /opt/projecthub/.ssh/known_hosts
-sudo -u projecthub git ls-remote git@github.com:OWNER/REPOSITORY.git refs/heads/main
+sudo useradd --system --home-dir /opt/chitoproject --create-home --shell /usr/sbin/nologin chitoproject
+sudo install -d -m 700 -o chitoproject -g chitoproject /opt/chitoproject/.ssh
+sudo -u chitoproject ssh-keygen -t ed25519 -N '' -f /opt/chitoproject/.ssh/id_ed25519 -C chitoproject-vps-read-only
+sudo cat /opt/chitoproject/.ssh/id_ed25519.pub
 ```
 
-نشانی بالا را با SSH URL مخزن خودتان جایگزین کنید. خروجی باید commit شاخهٔ `main` را نشان دهد. از Personal Access Token در URL یا history ترمینال استفاده نکنید.
+فقط خروجی **کلید عمومی** را در GitHub، بخش Settings → Deploy keys → Add deploy key همان مخزن ثبت کنید و گزینهٔ write access را فعال نکنید. کلید خصوصی را هرگز ارسال نکنید. کلید عمومی میزبان GitHub را مطابق [مستندات رسمی](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints) بررسی و ذخیره کنید:
 
 ```bash
-sudo bash scripts/install-vps.sh <git-repo-url> <domain>
+sudo sh -c 'printf "%s\n" "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > /opt/chitoproject/.ssh/known_hosts'
+sudo chown chitoproject:chitoproject /opt/chitoproject/.ssh/known_hosts
+sudo chmod 600 /opt/chitoproject/.ssh/known_hosts
+sudo -u chitoproject env GIT_SSH_COMMAND='ssh -i /opt/chitoproject/.ssh/id_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/opt/chitoproject/.ssh/known_hosts' git ls-remote git@github.com:Alidl81/chitoproject.git refs/heads/main
 ```
 
-نصب‌کننده این کارها را انجام می‌دهد: PostgreSQL محلی می‌سازد، کاربر سرویس غیرممتاز می‌سازد، venv نصب می‌کند، secretهای قوی تولید می‌کند، `.env` را از Git بیرون نگه می‌دارد، Caddy را برای HTTPS تنظیم می‌کند، migration را اجرا می‌کند و کد فعال‌سازی مالک را فقط یک بار چاپ می‌کند.
-
-کد فعال‌سازی را در:
-
-```text
-https://<domain>/admin/activate
-```
-
-وارد کنید. سپس فایل توکن‌ها را ویرایش کنید:
+در صورت وجود known_hosts از قبل، قبل از اجرای دستور اول آن را بررسی و حفظ کنید. خروجی ls-remote باید SHA شاخه را نشان دهد. نصب‌کننده و deploy هر دو همین کلید و known_hosts را صریحاً استفاده می‌کنند.
 
 ```bash
-sudo nano /etc/projecthub/projecthub.env
+cd /opt/chitoproject-repo
+git status --short
+git fetch origin main
+git pull --ff-only origin main
+sudo bash scripts/install-vps.sh git@github.com:Alidl81/chitoproject.git 46.249.107.214
 ```
 
-مقدار Telegram/Bale token و username را بدون `@` تنظیم کنید. توکن‌ها را در پیام‌رسان عمومی، مخزن، issue یا لاگ نگذارید. سپس:
+اگر checkout تغییر محلی دارد، ابتدا آن را حفظ کنید و خطا را بررسی کنید. نصب‌کننده روی checkout این مسیر تغییری نمی‌دهد و نسخهٔ مستقل برنامه را در `/opt/chitoproject/app` کلون می‌کند. فایل محرمانه در `/etc/chitoproject/chitoproject.env` نگهداری می‌شود. نصب مستقیم از ZIP پشتیبانی نمی‌شود.
+
+ورودی پورت TCP 80 و 443 از اینترنت باید به VPS برسد و پورت 8000 فقط محلی است. نصب از مخزن رسمی Caddy استفاده می‌کند و حداقل Caddy 2.11.1 می‌خواهد. برای IP از issuer رسمی Let's Encrypt و پروفایل shortlived استفاده می‌کند؛ اعتبار گواهی 160 ساعت است و Caddy در حال اجرا تمدید را انجام می‌دهد. صدور به دسترسی واقعی پورت‌ها و تأیید CA وابسته است. تا بررسی موفق گواهی مرورگر، کد فعال‌سازی را وارد نکنید:
 
 ```bash
-sudo systemctl restart projecthub-telegram projecthub-bale
-sudo -u projecthub /opt/projecthub/venv/bin/python -m app.cli check-bots
+curl --fail --show-error https://46.249.107.214/readyz
+sudo journalctl -u caddy -n 100 --no-pager
 ```
 
-اگر فقط یک پیام‌رسان لازم است، توکن پیام‌رسان دیگر را خالی بگذارید. API و worker از همان env استفاده می‌کنند.
-
-## به‌روزرسانی
-
-ابتدا تغییرات را در GitHub merge کنید. سپس روی VPS:
+کد یک‌بارمصرف نصب تا ۲۴ ساعت اعتبار دارد. در صورت فراموشی و تا پیش از ایجاد مالک، کد تازه با دستور زیر در ترمینال خصوصی ایجاد می‌شود و کد قبلی را باطل می‌کند:
 
 ```bash
-sudo bash /opt/projecthub/app/scripts/deploy.sh
+cd /opt/chitoproject/app
+sudo -u chitoproject /opt/chitoproject/venv/bin/python -m app.cli issue-owner-code
 ```
 
-اسکریپت روی checkout کثیف اجرا نمی‌شود؛ این کار مانع حذف تغییرات دستی می‌شود. از `git reset --hard` یا حذف volume/database در روند deploy استفاده نمی‌کند. migration پیش از restart اعمال می‌شود.
-
-## سرویس‌ها و لاگ
+پس از تأیید TLS، `https://46.249.107.214/admin/activate` را باز کنید، کد را وارد و حساب مالک را بسازید.
 
 ```bash
-sudo systemctl status projecthub-api projecthub-worker projecthub-telegram projecthub-bale
-sudo journalctl -u projecthub-api -u projecthub-worker -n 200 --no-pager
-sudo journalctl -u projecthub-telegram -u projecthub-bale -f
+sudo nano /etc/chitoproject/chitoproject.env
 ```
 
-پورت 8000 فقط روی `127.0.0.1` باز است؛ Caddy TLS را فراهم می‌کند. پنل پشت reverse proxy باید Host عمومی همان `PUBLIC_BASE_URL` را بفرستد. Uvicorn access log خاموش است تا pathهای موقتی invite در journal نمانند.
+توکن و نام کاربری هر ربات را در متغیرهای `TELEGRAM_BOT_TOKEN`، `TELEGRAM_BOT_USERNAME`، `BALE_BOT_TOKEN` و `BALE_BOT_USERNAME` وارد کنید؛ نام کاربری بدون @ است. سپس تمام سرویس‌ها را بازخوانی کنید تا پنل نیز نام‌های جدید را ببیند:
+
+```bash
+sudo systemctl restart chitoproject-api chitoproject-worker chitoproject-telegram chitoproject-bale
+cd /opt/chitoproject/app
+sudo -u chitoproject /opt/chitoproject/venv/bin/python -m app.cli check-bots
+sudo systemctl status caddy chitoproject-api chitoproject-worker chitoproject-telegram chitoproject-bale --no-pager
+sudo journalctl -u caddy -u chitoproject-api -u chitoproject-worker -u chitoproject-telegram -u chitoproject-bale -n 100 --no-pager
+```
+
+اگر فقط یک توکن تنظیم شود، سرویس مربوط به پیام‌رسان دیگر ممکن است اجرا نشود. اطلاعات محرمانه را در مخزن، اسکرین‌شات و گفتگو منتشر نکنید.
+
+## به‌روزرسانی نصب Git
+
+```bash
+sudo bash /opt/chitoproject/app/scripts/deploy.sh
+```
+
+اسکریپت با checkout کثیف متوقف می‌شود، با کلید کاربر سرویس fetch می‌کند و تنها fast-forward انجام می‌دهد. پیش از به‌روزرسانی از داده‌ها پشتیبان بگیرید. migration پیش از restart اجرا می‌شود.
 
 ## نصب دستی یا توسعه
 
@@ -87,7 +91,7 @@ python -m app.cli issue-owner-code
 نصب خودکار `age` را فراهم می‌کند. کلید عمومی را از محیط امن تنظیم کنید:
 
 ```bash
-sudo BACKUP_RECIPIENT='age1...' bash /opt/projecthub/app/scripts/backup.sh
+sudo BACKUP_RECIPIENT='age1...' bash /opt/chitoproject/app/scripts/backup.sh
 ```
 
 فایل `.age` هم dump دیتابیس transcript و هم فایل‌های upload را در خود دارد. کلید خصوصی را جدا از VPS نگه دارید. قبل از بازگردانی، سرویس‌ها را متوقف کنید، archive را با کلید خصوصی رمزگشایی کنید و dump/file volume را طبق عملیات استاندارد PostgreSQL بازیابی کنید؛ recovery script خودکار ارائه نشده تا اشتباهاً دادهٔ زنده جایگزین نشود.
@@ -95,6 +99,6 @@ sudo BACKUP_RECIPIENT='age1...' bash /opt/projecthub/app/scripts/backup.sh
 ## پایش اولیه
 
 - `GET /healthz` زنده بودن پردازه و `GET /readyz` اتصال دیتابیس را بررسی می‌کند.
-- فضای دیسک `/var/lib/projecthub/uploads` و `/var/backups/projecthub` را مانیتور کنید.
+- فضای دیسک `/var/lib/chitoproject/uploads` و `/var/backups/chitoproject` را مانیتور کنید.
 - وضعیت queue/outbox را در پنل و journal بررسی کنید.
 - قبل از استفادهٔ واقعی، اتصال واقعی هر توکن و ارسال/دریافت فایل در همان پیام‌رسان را به‌صورت کنترل‌شده بررسی کنید.

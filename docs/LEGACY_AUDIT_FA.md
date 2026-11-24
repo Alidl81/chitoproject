@@ -47,7 +47,7 @@
 | `alembic.ini` | پیکربندی migration. |
 | `docker-compose.yml` | PostgreSQL، Redis، migration، API، دو bot و worker؛ API روی loopback. |
 | `pyproject.toml`, `requirements.txt` | وابستگی‌ها و ابزارهای Python؛ Python 3.12، FastAPI، SQLAlchemy async، aiogram و httpx. |
-| `projecthub.db` | دیتابیس SQLite محلی ۵۱۶KB. بازبینی schema نشان داد کاربر، پروژه، transcript، فایل، invoice و پرداخت واقعی نداشت؛ دادهٔ seed تنظیمات و دسته‌ها داشت. در سورس تازه استفاده نمی‌شود. |
+| فایل SQLite محلی قبلی | دیتابیس SQLite محلی ۵۱۶KB. بازبینی schema نشان داد کاربر، پروژه، transcript، فایل، invoice و پرداخت واقعی نداشت؛ دادهٔ seed تنظیمات و دسته‌ها داشت. در سورس تازه استفاده نمی‌شود. |
 | `data/uploads/.gitkeep` | نگه‌داشت پوشهٔ خالی upload. |
 | `scripts/setup.py` | ساخت `.env` محلی و توکن‌های اختیاری. |
 | `scripts/backup.sh` | dump دیتابیس و tar فایل‌های upload در Docker؛ backup رمزگذاری نمی‌شد. |
@@ -159,7 +159,7 @@
 
 - `.pytest_cache`-مانند پوشهٔ `pytest-of-root` شامل lockfileها و فایل‌های تصادفی خروجی تست برای نام‌های `test_file_store_sniffs_content0`، `test_manual_payment_receipt_is0` و `test_needs_info_accepts_a_priv0` بود. این فایل‌ها سورس یا دادهٔ مشتری نیستند و باید حذف شوند.
 - ZIP مخزن `.git` و GitHub workflow نداشت؛ بنابراین provenance commit یا CI از خود بسته قابل بررسی نبود.
-- `.env` و `projecthub.db` تنها فایل‌های حاوی تنظیم/دادهٔ محلی بودند. دیتابیس بررسی‌شده دادهٔ واقعی مشتری نداشت؛ هیچ محتوای secret از `.env` در گزارش درج نشده است.
+- `.env` و فایل SQLite محلی قبلی تنها فایل‌های حاوی تنظیم/دادهٔ محلی بودند. دیتابیس بررسی‌شده دادهٔ واقعی مشتری نداشت؛ هیچ محتوای secret از `.env` در گزارش درج نشده است.
 
 ## ارجاع‌های فنی تحقیق
 

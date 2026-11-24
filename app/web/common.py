@@ -17,7 +17,7 @@ from app.models import AdminSession, AdminUser
 from app.permissions import has_permission, role_label
 from app.security import digest_token, now_utc, random_token
 
-COOKIE_NAME = "projecthub_session"
+COOKIE_NAME = "chitoproject_session"
 FORM_CSRF_COOKIE = "ph_form_csrf"
 templates = Environment(
     loader=FileSystemLoader(Path(__file__).resolve().parents[1] / "templates"),
