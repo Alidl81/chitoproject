@@ -10,8 +10,9 @@
   --faint: #71819b;
   --border: rgba(176, 197, 228, .13);
   --border-strong: rgba(205, 218, 241, .23);
-  --primary: linear-gradient(115deg, #e33b47 0%, #f36d32 56%, #f5b83c 100%);
-  --secondary: linear-gradient(115deg, #b92d3e, #ee7040);
+  --primary: #a52236;
+  --secondary: #24334a;
+  --danger-button: #a52236;
   --warm-soft: rgba(237, 102, 53, .12);
   --blue-soft: rgba(76, 139, 225, .14);
   --green: #63dbb6;
@@ -32,8 +33,9 @@ html[data-theme="light"] {
   --faint: #7186a2;
   --border: rgba(51, 93, 148, .14);
   --border-strong: rgba(43, 84, 140, .25);
-  --primary: linear-gradient(115deg, #70d3f7 0%, #4598ec 48%, #315aca 100%);
-  --secondary: linear-gradient(115deg, #ffca85 0%, #ff9b55 52%, #e97835 100%);
+  --primary: #1d5ba5;
+  --secondary: #ffd49d;
+  --danger-button: #a52236;
   --warm-soft: rgba(255, 162, 75, .13);
   --blue-soft: rgba(70, 151, 227, .12);
   --green: #087d60;
@@ -134,7 +136,7 @@ html[data-theme="light"] .button { box-shadow: 0 9px 20px rgba(50, 112, 201, .17
 .button.secondary { color: var(--ink); background: var(--secondary); }
 .button.glass { color: #fff; background: rgba(16, 25, 43, .65); border-color: var(--border-strong); box-shadow: none; z-index: 1; white-space: nowrap; }
 html[data-theme="light"] .button.glass { color: #153b72; background: rgba(255,255,255,.62); }
-.button.danger { color: #fff; background: linear-gradient(110deg, #b7253d, #e75048); }
+.button.danger { color: #fff; background: var(--danger-button); }
 .button.full { width: 100%; }
 .button.small { min-height: 34px; padding: 7px 10px; font-size: 11px; }
 .icon-link { width: 35px; height: 35px; display: inline-grid; place-items: center; border: 1px solid var(--border); border-radius: 11px; color: var(--ink); background: var(--surface-2); font-size: 16px; }
