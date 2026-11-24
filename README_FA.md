@@ -10,10 +10,11 @@
 
 ## راه‌اندازی روی VPS
 
-پیش‌نیاز نصب خودکار، Ubuntu 24.04 LTS، دسترسی root، دامنه‌ای که به VPS اشاره کند و نشانی Git مخزن است. برای repository خصوصی باید Deploy Key فقط‌خواندنی را پیش از نصب برای کاربر `projecthub` آماده کنید؛ جزئیات در [راهنمای استقرار](docs/DEPLOYMENT_FA.md) آمده است. نصب‌کننده PostgreSQL، Caddy، محیط مجازی، اسرار اولیه و migration پایگاه‌دادهٔ خالی را آماده می‌کند.
+پیش‌نیاز نصب خودکار، Ubuntu 24.04 LTS، دسترسی root، دامنه‌ای که به VPS اشاره کند و نشانی Git مخزن است. برای repository خصوصی باید Deploy Key فقط‌خواندنی را پیش از نصب برای کاربر `chitoproject` آماده کنید؛ جزئیات در [راهنمای استقرار](docs/DEPLOYMENT_FA.md) آمده است. نصب‌کننده PostgreSQL، Caddy، محیط مجازی، اسرار اولیه و migration پایگاه‌دادهٔ خالی را آماده می‌کند.
 
 ```bash
-sudo bash scripts/install-vps.sh <git-repo-url> <domain>
+git clone git@github.com:Alidl81/chitoproject.git /tmp/chitoproject-bootstrap
+sudo bash /tmp/chitoproject-bootstrap/scripts/install-vps.sh git@github.com:Alidl81/chitoproject.git <domain>
 ```
 
 کد فعال‌سازی یک‌بارمصرف مالک اصلی در خروجی نصب چاپ می‌شود. آن را در صفحهٔ HTTPS زیر وارد کنید؛ کد ۲۴ ساعت اعتبار دارد و فقط یک بار پذیرفته می‌شود:
@@ -22,11 +23,11 @@ sudo bash scripts/install-vps.sh <git-repo-url> <domain>
 https://<domain>/admin/activate
 ```
 
-توکن و نام کاربری ربات‌ها عمداً خالی می‌مانند. آن‌ها را در فایل خصوصی `/etc/projecthub/projecthub.env` بگذارید. نام کاربری‌ها را بدون `@` وارد کنید. سپس سرویس‌های مربوط را راه‌اندازی کنید:
+توکن و نام کاربری ربات‌ها عمداً خالی می‌مانند. آن‌ها را در فایل خصوصی `/etc/chitoproject/chitoproject.env` بگذارید. نام کاربری‌ها را بدون `@` وارد کنید. سپس سرویس‌های مربوط را راه‌اندازی کنید:
 
 ```bash
-sudo systemctl restart projecthub-telegram projecthub-bale
-sudo -u projecthub /opt/projecthub/venv/bin/python -m app.cli check-bots
+sudo systemctl restart chitoproject-telegram chitoproject-bale
+sudo -u chitoproject /opt/chitoproject/venv/bin/python -m app.cli check-bots
 ```
 
 برای هر نسخهٔ تازه، از ریشهٔ checkout اجرا کنید:
@@ -50,7 +51,7 @@ python -m pip install -e '.[dev]'
 cp .env.example .env
 ```
 
-برای اجرای محلی، مقادیر `APP_ENV=development`، `DATABASE_URL=sqlite+aiosqlite:///./projecthub-dev.db`، `SECRET_KEY` تصادفی و `UPLOADS_DIR=./data/uploads` را در `.env` بگذارید. برای Postgres، نشانی را به `postgresql+asyncpg://...` تغییر دهید. سپس:
+برای اجرای محلی، مقادیر `APP_ENV=development`، `DATABASE_URL=sqlite+aiosqlite:///./chitoproject-dev.db`، `SECRET_KEY` تصادفی و `UPLOADS_DIR=./data/uploads` را در `.env` بگذارید. برای Postgres، نشانی را به `postgresql+asyncpg://...` تغییر دهید. سپس:
 
 ```bash
 python -m app.cli migrate

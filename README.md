@@ -1,4 +1,4 @@
-# Student Project Hub
+# ChitoProject
 
 A private Telegram and Bale platform for receiving, tracking, and coordinating student projects. It is designed for work across academic fields, with the initial rollout focused on computer science and technology.
 
