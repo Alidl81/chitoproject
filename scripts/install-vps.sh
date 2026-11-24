@@ -195,7 +195,7 @@ systemctl restart caddy
 systemctl enable --now chitoproject-api chitoproject-worker
 # Bot services are started after their credentials are configured.
 for i in {1..30}; do
-  if curl --fail --silent http://127.0.0.1:8000/readyz >/dev/null; then break; fi
+  if curl --fail --silent -H "Host: ${PUBLIC_HOST}" http://127.0.0.1:8000/readyz >/dev/null; then break; fi
   if [[ "$i" == 30 ]]; then echo "Local readiness check failed; inspect service logs." >&2; exit 1; fi
   sleep 1
 done
@@ -207,7 +207,7 @@ The first owner code was printed above and expires after 24 hours. Use it once a
   https://${PUBLIC_HOST}/admin/activate
 
 Bot tokens and usernames are currently blank. Edit /etc/chitoproject/chitoproject.env,
-then run: sudo systemctl restart chitoproject-telegram chitoproject-bale
+then run: sudo systemctl restart chitoproject-api chitoproject-worker chitoproject-telegram chitoproject-bale
 
 For later releases, run as root from the checkout:
   sudo bash ${APP_DIR}/scripts/deploy.sh
