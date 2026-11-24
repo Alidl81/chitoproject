@@ -1,7 +1,7 @@
 (() => {
   const root = document.documentElement;
   try {
-    const saved = localStorage.getItem("projecthub-theme");
+    const saved = localStorage.getItem("chitoproject-theme");
     if (saved === "light" || saved === "dark") root.dataset.theme = saved;
   } catch (_) {}
 
@@ -15,7 +15,7 @@
     const toggle = event.target.closest("[data-theme-toggle]");
     if (toggle) {
       root.dataset.theme = root.dataset.theme === "light" ? "dark" : "light";
-      try { localStorage.setItem("projecthub-theme", root.dataset.theme); } catch (_) {}
+      try { localStorage.setItem("chitoproject-theme", root.dataset.theme); } catch (_) {}
     }
     const copy = event.target.closest("[data-copy]");
     if (copy) {
