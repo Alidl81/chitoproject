@@ -12,8 +12,6 @@
 
 نصب خودکار برای Ubuntu 24.04 LTS آماده شده است. نصب از Git با دامنه یا IPv4 عمومی و Deploy Key فقط‌خواندنی انجام می‌شود. نصب مستقیم از ZIP غیرفعال است. نصب‌کننده PostgreSQL، Caddy، محیط مجازی، اسرار اولیه و migration پایگاه‌دادهٔ خالی را آماده می‌کند. جزئیات در [راهنمای استقرار](docs/DEPLOYMENT_FA.md) آمده است.
 
-برای نصب از بستهٔ آمادهٔ ZIP (بدون clone گیت)، مراحل بخش «نصب از بستهٔ ZIP» در [راهنمای استقرار](docs/DEPLOYMENT_FA.md) را دنبال کنید.
-
 ```bash
 git clone git@github.com:Alidl81/chitoproject.git /tmp/chitoproject-bootstrap
 sudo bash /tmp/chitoproject-bootstrap/scripts/install-vps.sh git@github.com:Alidl81/chitoproject.git <domain-or-ip>
@@ -28,7 +26,8 @@ https://<domain>/admin/activate
 توکن و نام کاربری ربات‌ها عمداً خالی می‌مانند. آن‌ها را در فایل خصوصی `/etc/chitoproject/chitoproject.env` بگذارید. نام کاربری‌ها را بدون `@` وارد کنید. سپس سرویس‌های مربوط را راه‌اندازی کنید:
 
 ```bash
-sudo systemctl restart chitoproject-telegram chitoproject-bale
+sudo systemctl restart chitoproject-api chitoproject-worker chitoproject-telegram chitoproject-bale
+cd /opt/chitoproject/app
 sudo -u chitoproject /opt/chitoproject/venv/bin/python -m app.cli check-bots
 ```
 
