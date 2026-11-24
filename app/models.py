@@ -118,6 +118,7 @@ class Project(Base):
     customer_id: Mapped[str] = mapped_column(ForeignKey("customers.id", ondelete="RESTRICT"), index=True)
     conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id", ondelete="RESTRICT"), index=True)
     title: Mapped[str] = mapped_column(String(180))
+    subject_area: Mapped[str] = mapped_column(String(40), default="computer", server_default="computer")
     description: Mapped[str] = mapped_column(Text)
     deadline_note: Mapped[str] = mapped_column(String(120), default="")
     budget_toman: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
