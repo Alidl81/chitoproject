@@ -147,7 +147,7 @@ async def test_archive_quota_counts_project_files_without_double_counting(db_con
                                 state="home", draft_data={})
     session.add(conversation)
     await session.flush()
-    project = Project(public_id="PH-QUOTA", customer_id=customer.id, conversation_id=conversation.id,
+    project = Project(public_id="CP-QUOTA", customer_id=customer.id, conversation_id=conversation.id,
                       title="پروژهٔ نمونه", description="توضیح کافی برای پروژهٔ نمونه")
     session.add(project)
     await session.flush()
@@ -244,7 +244,7 @@ async def test_admin_conversation_page_renders_and_csrf_is_enforced(db_context) 
     app.dependency_overrides[get_session] = override_session
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
-            client.cookies.set("projecthub_session", raw_token, path="/admin")
+            client.cookies.set("chitoproject_session", raw_token, path="/admin")
             response = await client.get("/admin/conversations")
             assert response.status_code == 200
             assert "گفتگوهای مشتریان" in response.text
@@ -324,7 +324,7 @@ async def test_support_lands_in_conversations_without_project_access(db_context)
     app.dependency_overrides[get_session] = override_session
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
-            client.cookies.set("projecthub_session", raw_token, path="/admin")
+            client.cookies.set("chitoproject_session", raw_token, path="/admin")
             home = await client.get("/admin", follow_redirects=False)
             assert home.status_code == 303
             assert home.headers["location"] == "/admin/conversations"
@@ -367,7 +367,7 @@ async def test_manager_cannot_create_bot_link_for_another_member(db_context, mon
     app.dependency_overrides[get_session] = override_session
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
-            client.cookies.set("projecthub_session", raw_token, path="/admin")
+            client.cookies.set("chitoproject_session", raw_token, path="/admin")
             response = await client.post(f"/admin/team/{other.id}/bot-link",
                                          data={"platform": "telegram", "csrf_token": csrf})
             assert response.status_code == 403

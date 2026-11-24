@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 os.environ.setdefault("APP_ENV", "development")
-os.environ.setdefault("SECRET_KEY", "test-key-for-projecthub-unit-tests-32-bytes")
+os.environ.setdefault("SECRET_KEY", "test-key-for-chitoproject-unit-tests-32-bytes")
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 
 import pytest_asyncio
