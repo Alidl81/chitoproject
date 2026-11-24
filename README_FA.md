@@ -10,11 +10,13 @@
 
 ## راه‌اندازی روی VPS
 
-پیش‌نیاز نصب خودکار، Ubuntu 24.04 LTS، دسترسی root، دامنه‌ای که به VPS اشاره کند و نشانی Git مخزن است. برای repository خصوصی باید Deploy Key فقط‌خواندنی را پیش از نصب برای کاربر `chitoproject` آماده کنید؛ جزئیات در [راهنمای استقرار](docs/DEPLOYMENT_FA.md) آمده است. نصب‌کننده PostgreSQL، Caddy، محیط مجازی، اسرار اولیه و migration پایگاه‌دادهٔ خالی را آماده می‌کند.
+نصب خودکار برای Ubuntu 24.04 LTS آماده شده است. نصب از Git با دامنه یا IPv4 عمومی و Deploy Key فقط‌خواندنی انجام می‌شود. نصب مستقیم از ZIP غیرفعال است. نصب‌کننده PostgreSQL، Caddy، محیط مجازی، اسرار اولیه و migration پایگاه‌دادهٔ خالی را آماده می‌کند. جزئیات در [راهنمای استقرار](docs/DEPLOYMENT_FA.md) آمده است.
+
+برای نصب از بستهٔ آمادهٔ ZIP (بدون clone گیت)، مراحل بخش «نصب از بستهٔ ZIP» در [راهنمای استقرار](docs/DEPLOYMENT_FA.md) را دنبال کنید.
 
 ```bash
 git clone git@github.com:Alidl81/chitoproject.git /tmp/chitoproject-bootstrap
-sudo bash /tmp/chitoproject-bootstrap/scripts/install-vps.sh git@github.com:Alidl81/chitoproject.git <domain>
+sudo bash /tmp/chitoproject-bootstrap/scripts/install-vps.sh git@github.com:Alidl81/chitoproject.git <domain-or-ip>
 ```
 
 کد فعال‌سازی یک‌بارمصرف مالک اصلی در خروجی نصب چاپ می‌شود. آن را در صفحهٔ HTTPS زیر وارد کنید؛ کد ۲۴ ساعت اعتبار دارد و فقط یک بار پذیرفته می‌شود:
