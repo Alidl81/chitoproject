@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="fa" dir="rtl" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>{% block title %}پنل مدیریت{% endblock %} · ChitoProject</title>
+  <link rel="stylesheet" href="/static/admin.css">
+  <script src="/static/admin.js" defer></script>
+</head>
+<body>
+{% if admin %}
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/admin"><span class="brand-mark">C</span><span><b>ChitoProject</b><small>فضای مدیریت پروژه</small></span></a>
+      <div class="sidebar-label">فضای کاری</div>
+      <nav class="nav-list">
+        <a href="/admin" class="nav-link {% if current_path == '/admin' %}active{% endif %}"><span>⌂</span> نمای کلی</a>
+        {% if can_projects %}<a href="/admin/projects" class="nav-link {% if current_path.startswith('/admin/projects') %}active{% endif %}"><span>▦</span> پروژه‌ها</a>{% endif %}
+        {% if has_customers %}<a href="/admin/conversations" class="nav-link {% if current_path.startswith('/admin/conversations') %}active{% endif %}"><span>◌</span> گفتگوها</a>{% endif %}
+        {% if can_team %}<a href="/admin/team" class="nav-link {% if current_path.startswith('/admin/team') %}active{% endif %}"><span>♧</span> تیم و دعوت‌ها</a>{% endif %}
+        {% if can_reports %}<a href="/admin/audit" class="nav-link {% if current_path.startswith('/admin/audit') %}active{% endif %}"><span>◷</span> گزارش فعالیت</a>{% endif %}
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="profile-chip"><span class="avatar">{{ (admin.display_name or admin.username)[0]|upper }}</span><span><b>{{ admin.display_name or admin.username }}</b><small>{{ role_label(admin.role) }}</small></span></div>
+        <a href="/admin/profile" class="nav-link {% if current_path == '/admin/profile' %}active{% endif %}"><span>⚙</span> حساب کاربری</a>
+        <form method="post" action="/admin/logout"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="nav-link nav-button" type="submit"><span>↪</span> خروج امن</button></form>
+      </div>
+    </aside>
+    <main class="main-area">
+      <header class="topbar">
+        <div><span class="eyebrow">{{ page_kicker|default('مدیریت و پیگیری') }}</span><h1>{% block heading %}{{ page_title|default('نمای کلی') }}{% endblock %}</h1></div>
+        <div class="top-actions"><span class="live-indicator">سامانه فعال</span><button class="theme-toggle" type="button" data-theme-toggle aria-label="تغییر پوسته"><span class="theme-icon">◐</span><span>تغییر پوسته</span></button></div>
+      </header>
+      {% if notice %}<div class="notice" role="status">{{ notice_label(notice) }}</div>{% endif %}
+      {% if notice_text %}<div class="notice" role="status">{{ notice_text }}</div>{% endif %}
+      <section class="page-content">{% block content %}{% endblock %}</section>
+      <footer class="footer"><span>ChitoProject · فضای یکپارچهٔ دریافت و پیگیری پروژه</span><span>نسخهٔ ۲٫۰</span></footer>
+    </main>
+  </div>
+{% else %}
+  <main class="auth-shell">
+    <div class="auth-brand"><span class="brand-mark">C</span><span><b>ChitoProject</b><small>فضای امن مدیریت و همکاری</small></span><button class="theme-toggle" type="button" data-theme-toggle>تغییر پوسته</button></div>
+    {% if notice %}<div class="notice">{{ notice_label(notice) }}</div>{% endif %}
+    {% block auth_content %}{% endblock %}
+    <footer class="auth-footer">دسترسی این بخش فقط برای اعضای مجاز تیم است.</footer>
+  </main>
+{% endif %}
+</body>
+</html>

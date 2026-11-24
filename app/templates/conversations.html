@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}گفتگوها{% endblock %}
+{% block heading %}گفتگوهای مشتریان{% endblock %}
+{% block content %}
+<section class="panel-card"><div class="panel-heading"><div><p class="eyebrow">تاریخچهٔ ارتباط</p><h2>آخرین گفتگوها</h2><p class="muted">{{ total }} گفتگو · پیام‌های بایگانی‌شده حتی پس از پاک‌سازی صفحهٔ مشتری باقی می‌مانند.</p></div><span class="section-icon small">◌</span></div>
+<form method="get" action="/admin/conversations" class="filter-bar"><label class="search-field"><span>⌕</span><input name="q" value="{{ search }}" placeholder="جست‌وجو با نام مشتری یا شناسهٔ گفتگو"></label><button class="button secondary" type="submit">جست‌وجو</button></form>
+{% if items %}<div class="conversation-list">{% for item in items %}<a class="conversation-row" href="/admin/conversations/{{ item.conversation.id }}"><span class="conversation-avatar">{{ (item.conversation.platform[:1])|upper }}</span><span class="conversation-main"><b>{{ item.last.actor_label if item.last else 'گفتگو' }}</b><small>{{ item.last.content[:120] if item.last else 'بدون پیام ثبت‌شده' }}</small></span><span class="conversation-meta"><b>{{ 'Telegram' if item.conversation.platform == 'telegram' else 'Bale' }}</b><small>{{ item.project_count }} پروژه</small></span><span class="row-chevron">←</span></a>{% endfor %}</div>{% else %}<div class="empty-state"><span>◌</span><b>گفتگویی ثبت نشده</b><p>با شروع مکاتبه از سمت مشتری، تاریخچه در اینجا ذخیره می‌شود.</p></div>{% endif %}</section>
+{% if page_count > 1 %}<div class="pagination"><span>صفحهٔ {{ page }} از {{ page_count }}</span>{% if page > 1 %}<a class="button small secondary" href="?page={{ page - 1 }}&q={{ search }}">جدیدتر</a>{% endif %}{% if page < page_count %}<a class="button small secondary" href="?page={{ page + 1 }}&q={{ search }}">قدیمی‌تر</a>{% endif %}</div>{% endif %}
+{% endblock %}

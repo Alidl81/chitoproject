@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}پروژه‌ها{% endblock %}
+{% block heading %}پروژه‌ها{% endblock %}
+{% block content %}
+<section class="panel-card">
+  <div class="panel-heading"><div><p class="eyebrow">صف بررسی و اجرا</p><h2>درخواست‌های پروژه</h2><p class="muted">{{ total }} نتیجه · اطلاعات ثبت‌شده در این بخش خصوصی است.</p></div><span class="section-icon small">▦</span></div>
+  <form method="get" action="/admin/projects" class="filter-bar">
+    <label class="search-field"><span>⌕</span><input name="q" value="{{ search }}" placeholder="جست‌وجو با عنوان یا شناسه"></label>
+    <select name="status"><option value="">همهٔ وضعیت‌ها</option>{% for code, label in status_labels.items() %}<option value="{{ code }}" {% if selected_status == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+    <button class="button secondary" type="submit">اعمال فیلتر</button>
+  </form>
+  {% if items %}<div class="table-wrap"><table><thead><tr><th>درخواست</th><th>شناسه</th><th>وضعیت</th><th>آخرین تغییر</th><th></th></tr></thead><tbody>
+  {% for project in items %}<tr><td><a class="table-title" href="/admin/projects/{{ project.id }}">{{ project.title }}</a><small class="table-sub">{{ project.description[:100] }}{% if project.description|length > 100 %}…{% endif %}</small></td><td><span class="mono">{{ project.public_id }}</span></td><td><span class="status-pill status-{{ project.status }}">{{ status_labels.get(project.status, project.status) }}</span></td><td>{{ project.updated_at.strftime('%Y-%m-%d %H:%M') }}</td><td><a class="icon-link" href="/admin/projects/{{ project.id }}" aria-label="باز کردن پروژه">←</a></td></tr>{% endfor %}
+  </tbody></table></div>{% else %}<div class="empty-state"><span>⌕</span><b>موردی پیدا نشد</b><p>فیلترها را تغییر دهید یا بعداً دوباره سر بزنید.</p></div>{% endif %}
+  {% if total > 30 %}<div class="pagination"><span>صفحهٔ {{ page }}</span>{% if page > 1 %}<a class="button small secondary" href="?page={{ page - 1 }}&q={{ search }}&status={{ selected_status }}">قبلی</a>{% endif %}{% if total > page * 30 %}<a class="button small secondary" href="?page={{ page + 1 }}&q={{ search }}&status={{ selected_status }}">بعدی</a>{% endif %}</div>{% endif %}
+</section>
+{% endblock %}

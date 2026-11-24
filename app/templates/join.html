@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}پیوستن به تیم{% endblock %}
+{% block auth_content %}
+<section class="auth-card">
+  <div class="section-icon">♧</div><p class="eyebrow">دعوت به همکاری</p><h1>ساخت حساب تیمی</h1>
+  {% if available %}
+    <p class="muted">سطح دسترسی پس از پذیرش، مطابق نقشی که دعوت‌کننده تعیین کرده فعال می‌شود. لینک یک‌بار مصرف است.</p>
+    <form method="post" action="/admin/join" class="form-stack" data-invite-form>
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="invite_token" data-invite-token value="">
+      <label>نام کاربری<input name="username" autocomplete="username" required minlength="3" maxlength="80" pattern="[a-zA-Z0-9_.-]+"></label>
+      <label>نام نمایشی<input name="display_name" autocomplete="name" maxlength="160"></label>
+      <label>رمز عبور<input name="password" type="password" autocomplete="new-password" required minlength="14" maxlength="256"></label>
+      <label>تکرار رمز عبور<input name="password_confirm" type="password" autocomplete="new-password" required minlength="14" maxlength="256"></label>
+      <button class="button primary full" type="submit">پذیرش دعوت</button>
+    </form>
+  {% else %}
+    <p class="muted">این دعوت منقضی شده یا قبلاً استفاده شده است. از دعوت‌کننده لینک تازه بگیرید.</p>
+    <a class="button secondary full" href="/admin/login">رفتن به ورود</a>
+  {% endif %}
+</section>
+{% endblock %}

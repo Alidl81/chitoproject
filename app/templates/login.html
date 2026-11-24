@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}ورود تیم{% endblock %}
+{% block auth_content %}
+<section class="auth-card">
+  <div class="section-icon">↗</div><p class="eyebrow">خوش آمدید</p><h1>ورود به فضای مدیریت</h1>
+  <p class="muted">برای مشاهدهٔ پروژه‌ها و هماهنگی با تیم، وارد حساب کاری خود شوید.</p>
+  <form method="post" action="/admin/login" class="form-stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>نام کاربری<input name="username" autocomplete="username" required maxlength="80"></label>
+    <label>رمز عبور<input name="password" type="password" autocomplete="current-password" required maxlength="256"></label>
+    <button class="button primary full" type="submit">ورود امن <span>←</span></button>
+  </form>
+  <p class="fine-print">اگر لینک دعوت دریافت کرده‌اید، آن را باز کنید تا دسترسی‌تان فعال شود.</p>
+</section>
+{% endblock %}

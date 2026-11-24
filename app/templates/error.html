@@ -1,0 +1,4 @@
+{% extends "base.html" %}
+{% block title %}{{ title }}{% endblock %}
+{% block heading %}{{ title }}{% endblock %}
+{% block content %}<section class="panel-card error-card"><div class="section-icon">!</div><h2>{{ title }}</h2><p class="muted">{{ message }}</p><a class="button secondary" href="/admin">بازگشت به پنل</a></section>{% endblock %}

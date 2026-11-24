@@ -1,0 +1,4 @@
+{% extends "base.html" %}
+{% block title %}گزارش فعالیت{% endblock %}
+{% block heading %}گزارش فعالیت مدیریتی{% endblock %}
+{% block content %}<section class="panel-card"><div class="panel-heading"><div><p class="eyebrow">ردپای امنیتی</p><h2>اقدام‌های اخیر</h2><p class="muted">آخرین ۳۰۰ رویداد ثبت‌شده</p></div><span class="section-icon small">◷</span></div>{% if entries %}<div class="table-wrap"><table><thead><tr><th>زمان</th><th>عامل</th><th>اقدام</th><th>موضوع</th><th>شناسه</th></tr></thead><tbody>{% for entry in entries %}<tr><td>{{ format_local(entry.created_at) }}</td><td>{{ entry.actor_admin_id or 'سامانه' }}</td><td><span class="mono">{{ entry.action }}</span></td><td>{{ entry.object_type }}</td><td class="mono">{{ entry.object_id }}</td></tr>{% endfor %}</tbody></table></div>{% else %}<div class="empty-state"><b>رویدادی ثبت نشده</b></div>{% endif %}</section>{% endblock %}

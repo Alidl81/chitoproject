@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}نمای کلی{% endblock %}
+{% block heading %}نمای کلی{% endblock %}
+{% block content %}
+<div class="welcome-card">
+  <div><p class="eyebrow">مدیریت پروژه‌ها</p><h2>سلام {{ admin.display_name or admin.username }}، به فضای کاری خوش آمدید.</h2><p>درخواست‌ها، گفتگوها و همکاری تیمی از یک پنل قابل پیگیری است.</p></div>
+  <a class="button glass" href="/admin/projects">رفتن به پروژه‌ها <span>←</span></a>
+</div>
+<div class="stat-grid">
+  <article class="stat-card accent-amber"><span class="stat-symbol">◈</span><span class="stat-label">همهٔ درخواست‌ها</span><strong>{{ total }}</strong><small>از ابتدا تا امروز</small></article>
+  <article class="stat-card accent-blue"><span class="stat-symbol">◷</span><span class="stat-label">در جریان</span><strong>{{ active_projects }}</strong><small>منتظر بررسی یا اجرا</small></article>
+  <article class="stat-card accent-cyan"><span class="stat-symbol">◎</span><span class="stat-label">وضعیت‌ها</span><strong>{{ counts.get('completed', 0) }}</strong><small>درخواست تکمیل‌شده</small></article>
+  <article class="stat-card accent-red"><span class="stat-symbol">♧</span><span class="stat-label">مشتری‌ها</span><strong>{{ total_customers }}</strong><small>گفتگوهای خصوصی ثبت‌شده</small></article>
+</div>
+<div class="content-grid">
+  <section class="panel-card">
+    <div class="panel-heading"><div><p class="eyebrow">آخرین به‌روزرسانی‌ها</p><h2>پروژه‌های تازه</h2></div><a class="text-link" href="/admin/projects">مشاهده همه ←</a></div>
+    {% if recent %}<div class="project-list compact">
+      {% for project in recent %}<a class="project-row" href="/admin/projects/{{ project.id }}"><span class="project-avatar">{{ project.title[:1] }}</span><span class="project-main"><b>{{ project.title }}</b><small>{{ project.public_id }} · {{ project.updated_at.strftime('%Y-%m-%d %H:%M') }}</small></span><span class="status-pill status-{{ project.status }}">{{ status_labels.get(project.status, project.status) }}</span><span class="row-chevron">←</span></a>{% endfor %}
+    </div>{% else %}<div class="empty-state"><span>✧</span><b>هنوز درخواستی ثبت نشده</b><p>درخواست‌های تازه پس از ثبت اینجا دیده می‌شوند.</p></div>{% endif %}
+  </section>
+  <section class="panel-card status-card">
+    <div class="panel-heading"><div><p class="eyebrow">نمای زنده</p><h2>وضعیت درخواست‌ها</h2></div><span class="live-indicator">به‌روز</span></div>
+    {% for status, label in status_labels.items() %}<div class="status-line"><span>{{ label }}</span><progress class="status-progress progress-{{ loop.index }}" max="{{ total if total else 1 }}" value="{{ counts.get(status, 0) }}">{{ counts.get(status, 0) }}</progress><b>{{ counts.get(status, 0) }}</b></div>{% endfor %}
+  </section>
+</div>
+{% endblock %}
