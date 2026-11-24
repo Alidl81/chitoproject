@@ -111,10 +111,23 @@ async def _project_scope(db: AsyncSession, admin: AdminUser, project_id: str) ->
 async def _queue_customer_message(db: AsyncSession, conversation: Conversation, admin: AdminUser,
                                   body: str, key: str) -> ConversationMessage:
     conversation.updated_at = now_utc()
+    session_field = ConversationMessage.metadata_json["support_session_id"].as_string()
+    support_session_id = await db.scalar(
+        select(session_field)
+        .where(
+            ConversationMessage.conversation_id == conversation.id,
+            session_field.is_not(None),
+        )
+        .order_by(ConversationMessage.created_at.desc(), ConversationMessage.id.desc())
+        .limit(1)
+    )
+    metadata = {"delivery_status": "queued"}
+    if support_session_id:
+        metadata["support_session_id"] = str(support_session_id)
     message = ConversationMessage(
         conversation_id=conversation.id, direction="outbound",
         actor_label=admin.display_name or admin.username,
-        content=body[:4000], message_kind="text", metadata_json={"delivery_status": "queued"},
+        content=body[:4000], message_kind="text", metadata_json=metadata,
     )
     db.add(message)
     await db.flush()
