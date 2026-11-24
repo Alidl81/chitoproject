@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-umask 077
+umask 022
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Run this installer as root: sudo bash scripts/install-vps.sh <git-repo-url> <host>" >&2
@@ -129,6 +129,7 @@ CREATE ROLE chitoproject LOGIN PASSWORD :'chitoproject_password';
 CREATE DATABASE chitoproject OWNER chitoproject;
 SQL
 
+umask 077
 cat > /etc/chitoproject/chitoproject.env <<EOF
 APP_ENV=production
 APP_NAME=ChitoProject
@@ -151,6 +152,7 @@ BOT_WORKER_CONCURRENCY=8
 EOF
 chown root:chitoproject /etc/chitoproject/chitoproject.env
 chmod 0640 /etc/chitoproject/chitoproject.env
+umask 022
 ln -s /etc/chitoproject/chitoproject.env "$APP_DIR/.env"
 
 install -o root -g root -m 0644 "$APP_DIR/deploy/systemd/chitoproject-api.service" /etc/systemd/system/chitoproject-api.service
