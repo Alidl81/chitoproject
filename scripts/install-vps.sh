@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+umask 077
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Run this installer as root: sudo bash scripts/install-vps.sh <git-repo-url> <host>" >&2
