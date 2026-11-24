@@ -15,15 +15,15 @@ if ! command -v age >/dev/null 2>&1; then
   exit 2
 fi
 
-BACKUP_DIR="${1:-/var/backups/projecthub}"
+BACKUP_DIR="${1:-/var/backups/chitoproject}"
 install -d -o root -g root -m 0700 "$BACKUP_DIR"
 umask 077
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf -- "$TMP_DIR"' EXIT
 
-runuser -u postgres -- pg_dump --format=custom --dbname=projecthub > "$TMP_DIR/database.dump"
-tar -C /var/lib/projecthub -czf "$TMP_DIR/uploads.tar.gz" uploads
+runuser -u postgres -- pg_dump --format=custom --dbname=chitoproject > "$TMP_DIR/database.dump"
+tar -C /var/lib/chitoproject -czf "$TMP_DIR/uploads.tar.gz" uploads
 tar -C "$TMP_DIR" -czf - database.dump uploads.tar.gz | age --recipient "$RECIPIENT" \
   --output "$BACKUP_DIR/chitoproject-${STAMP}.tar.gz.age"
 chmod 0600 "$BACKUP_DIR/chitoproject-${STAMP}.tar.gz.age"
