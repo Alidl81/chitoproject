@@ -1,6 +1,6 @@
 # ChitoProject
 
-A private Telegram and Bale platform for receiving, tracking, and coordinating student projects. It is designed for work across academic fields, with the initial rollout focused on computer science and technology.
+A private Telegram and Bale platform for receiving, tracking, and coordinating student projects. The current customer intake begins with a short discipline choice and exposes only the active Computer option.
 
 The platform includes a customer intake flow, project tracking, a role-based collaboration team, a Persian RTL administration panel, and an archived conversation history. The customer-facing bot keeps the chat compact through edited control messages and inline actions.
 
@@ -13,7 +13,7 @@ The platform includes a customer intake flow, project tracking, a role-based col
 
 ## Stack
 
-Python 3.12+, FastAPI, SQLAlchemy async, PostgreSQL, Alembic, and server-rendered HTML/CSS/JavaScript. Telegram and Bale use separate adapters over a shared application and database.
+Python 3.12.16, FastAPI, SQLAlchemy async, PostgreSQL, Alembic, and server-rendered HTML/CSS/JavaScript. Telegram and Bale use separate adapters over a shared application and database. VPS Python is managed by uv under `/opt/chitoproject-python`; the system Python is untouched.
 
 ## Quick start
 
