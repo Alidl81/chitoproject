@@ -69,7 +69,7 @@ async def check_bots() -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="projecthub")
+    parser = argparse.ArgumentParser(prog="chitoproject")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("migrate", help="Apply database migrations to head")
     sub.add_parser("issue-owner-code", help="Generate the first one-time owner activation code")

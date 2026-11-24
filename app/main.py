@@ -15,7 +15,7 @@ from app.database import engine
 from app.web import router as web_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-logger = logging.getLogger("projecthub")
+logger = logging.getLogger("chitoproject")
 
 
 @asynccontextmanager

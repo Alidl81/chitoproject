@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     app_env: str = "development"
     app_name: str = "ChitoProject"
     public_base_url: str = "http://127.0.0.1:8000"
-    database_url: str = "sqlite+aiosqlite:///./projecthub-dev.db"
+    database_url: str = "sqlite+aiosqlite:///./chitoproject-dev.db"
     secret_key: SecretStr = SecretStr("")
     telegram_bot_token: SecretStr | None = None
     bale_bot_token: SecretStr | None = None
