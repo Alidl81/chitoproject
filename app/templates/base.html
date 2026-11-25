@@ -30,7 +30,7 @@
     <main class="main-area">
       <header class="topbar">
         <div><span class="eyebrow">{{ page_kicker|default('مدیریت و پیگیری') }}</span><h1>{% block heading %}{{ page_title|default('نمای کلی') }}{% endblock %}</h1></div>
-        <div class="top-actions"><span class="live-indicator">سامانه فعال</span><button class="theme-toggle" type="button" data-theme-toggle aria-label="تغییر پوسته"><span class="theme-icon">◐</span><span>تغییر پوسته</span></button></div>
+        <div class="top-actions"><span class="live-indicator">سامانه فعال</span><button class="theme-toggle" type="button" data-theme-toggle aria-label="تغییر به پوستهٔ روشن"><span class="theme-icon" aria-hidden="true">◐</span><span data-theme-label>پوستهٔ روشن</span></button></div>
       </header>
       {% if notice %}<div class="notice" role="status">{{ notice_label(notice) }}</div>{% endif %}
       {% if notice_text %}<div class="notice" role="status">{{ notice_text }}</div>{% endif %}
@@ -40,7 +40,7 @@
   </div>
 {% else %}
   <main class="auth-shell">
-    <div class="auth-brand"><span class="brand-mark">C</span><span><b>ChitoProject</b><small>فضای امن مدیریت و همکاری</small></span><button class="theme-toggle" type="button" data-theme-toggle>تغییر پوسته</button></div>
+    <div class="auth-brand"><span class="brand-mark">C</span><span><b>ChitoProject</b><small>فضای امن مدیریت و همکاری</small></span><button class="theme-toggle" type="button" data-theme-toggle aria-label="تغییر به پوستهٔ روشن"><span class="theme-icon" aria-hidden="true">◐</span><span data-theme-label>پوستهٔ روشن</span></button></div>
     {% if notice %}<div class="notice">{{ notice_label(notice) }}</div>{% endif %}
     {% block auth_content %}{% endblock %}
     <footer class="auth-footer">دسترسی این بخش فقط برای اعضای مجاز تیم است.</footer>
