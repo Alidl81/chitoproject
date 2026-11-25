@@ -14,6 +14,7 @@ from app.database import SessionLocal
 from app.models import IncomingUpdate, PollerLease, now_utc
 
 logger = logging.getLogger("chitoproject.poller")
+LEASE_RETRY_SECONDS = 10
 
 
 def _aware(value: datetime) -> datetime:
@@ -109,28 +110,33 @@ async def run_bot(platform: str) -> None:
         logger.info("connector disabled platform=%s", platform)
         return
     owner = secrets.token_urlsafe(18)
-    if not await _claim_lease(platform, owner):
-        logger.error("poller lease is already held platform=%s", platform)
-        await adapter.close()
-        return
-    offset = await _last_offset(platform)
-    logger.info("poller started platform=%s", platform)
     try:
         while True:
-            if not await _renew_lease(platform, owner):
-                logger.error("poller lease lost platform=%s", platform)
-                break
+            if not await _claim_lease(platform, owner):
+                logger.info("poller lease is held; retrying platform=%s", platform)
+                await asyncio.sleep(LEASE_RETRY_SECONDS)
+                continue
+
             try:
-                updates = await adapter.get_updates(offset, settings.bot_polling_timeout)
-                max_id = await _persist_updates(platform, updates)
-                if max_id is not None:
-                    offset = max_id + 1
-                await _ack_callbacks(adapter, updates)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.warning("poll cycle failed platform=%s error=%s", platform, type(exc).__name__)
-                await asyncio.sleep(3)
+                offset = await _last_offset(platform)
+                logger.info("poller started platform=%s", platform)
+                while True:
+                    if not await _renew_lease(platform, owner):
+                        logger.warning("poller lease lost; reacquiring platform=%s", platform)
+                        break
+                    try:
+                        updates = await adapter.get_updates(offset, settings.bot_polling_timeout)
+                        max_id = await _persist_updates(platform, updates)
+                        if max_id is not None:
+                            offset = max_id + 1
+                        await _ack_callbacks(adapter, updates)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        logger.warning("poll cycle failed platform=%s error=%s", platform, type(exc).__name__)
+                        await asyncio.sleep(3)
+            finally:
+                await _release_lease(platform, owner)
+            await asyncio.sleep(1)
     finally:
-        await _release_lease(platform, owner)
         await adapter.close()

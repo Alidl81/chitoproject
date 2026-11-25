@@ -47,6 +47,11 @@ class BotAdapter:
             limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
         )
 
+    def _keyboard(self, keyboard: list[list[dict[str, str]]] | None) -> list[list[dict[str, str]]] | None:
+        # Telegram and Bale both document `style` for InlineKeyboardButton, with
+        # the same enum values and platform-specific color rendering.
+        return keyboard
+
     async def _api(self, method: str, payload: dict[str, Any] | None = None) -> Any:
         try:
             response = await self.http.post(f"{self.api_base}/bot{self.token}/{method}", json=payload or {})
@@ -86,14 +91,14 @@ class BotAdapter:
     async def send_message(self, chat_id: str, text: str, keyboard: list[list[dict[str, str]]] | None = None) -> str:
         payload: dict[str, Any] = {"chat_id": chat_id, "text": text[:4000]}
         if keyboard:
-            payload["reply_markup"] = {"inline_keyboard": keyboard}
+            payload["reply_markup"] = {"inline_keyboard": self._keyboard(keyboard)}
         result = await self._api("sendMessage", payload)
         return str(result["message_id"])
 
     async def edit_message_text(self, chat_id: str, message_id: str, text: str, keyboard: list[list[dict[str, str]]] | None = None) -> None:
         payload: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "text": text[:4000]}
         if keyboard is not None:
-            payload["reply_markup"] = {"inline_keyboard": keyboard}
+            payload["reply_markup"] = {"inline_keyboard": self._keyboard(keyboard)}
         try:
             await self._api("editMessageText", payload)
         except ProviderError as exc:

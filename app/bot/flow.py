@@ -66,7 +66,13 @@ def _parse_budget(value: str) -> int | None:
     return amount
 
 
-def _button(text: str, callback: str | None = None, url: str | None = None) -> dict[str, str]:
+def _button(
+    text: str,
+    callback: str | None = None,
+    url: str | None = None,
+    *,
+    style: str | None = None,
+) -> dict[str, str]:
     value = {"text": text}
     if callback:
         if len(callback.encode("utf-8")) > 64:
@@ -74,22 +80,38 @@ def _button(text: str, callback: str | None = None, url: str | None = None) -> d
         value["callback_data"] = callback
     if url:
         value["url"] = url
+    if style is not None:
+        if style not in {"primary", "success", "danger"}:
+            raise ValueError("unsupported inline button style")
+        value["style"] = style
     return value
 
 
 def _home_keyboard(staff: bool = False, can_view_all: bool = False) -> list[list[dict[str, str]]]:
     if staff:
-        rows = [[_button("پروژه‌های من", "a:projects")]]
         if can_view_all:
-            rows.append([_button("صف بررسی پروژه‌ها", "a:queue")])
+            rows = [[_button("پروژه‌های من", "a:projects"), _button("صف بررسی", "a:queue")]]
+        else:
+            rows = [[_button("پروژه‌های من", "a:projects")]]
         rows.append([_button("ورود به پنل مدیریت", url=f"{settings.public_base_url.rstrip('/')}/admin/login")])
         return rows
     return [
-        [_button("ثبت درخواست پروژه", "c:new")],
-        [_button("پیگیری درخواست‌ها", "c:projects")],
-        [_button("راهنما و ارتباط با تیم", "c:help")],
-        [_button("پاک‌سازی صفحهٔ گفتگو", "c:clear")],
+        [
+            _button("ثبت پروژه", "c:new", style="primary"),
+            _button("پیگیری", "c:projects"),
+        ],
+        [_button("پشتیبانی", "c:help")],
     ]
+
+
+def _support_session_id(conversation: Conversation) -> str | None:
+    value = (conversation.draft_data or {}).get("support_session_id")
+    return str(value) if value else None
+
+
+def _support_keyboard() -> list[list[dict[str, str]]]:
+    return [[_button("پاک کردن صفحه", "c:clear", style="danger"),
+             _button("بازگشت به منو", "c:home")]]
 
 
 def _is_start(text: str) -> tuple[bool, str]:
@@ -170,6 +192,9 @@ async def _archive_inbound(db: AsyncSession, conversation: Conversation, update:
     elif message_kind != "text":
         text = text or f"[پیام {message_kind} دریافت شد]"
         metadata = _message_metadata(message, message_kind)
+    support_session_id = _support_session_id(conversation)
+    if conversation.state == "support" and support_session_id:
+        metadata["support_session_id"] = support_session_id
     provider_id = str(message.get("message_id", "")) or None
     revision = 1
     if edited and provider_id:
@@ -189,10 +214,13 @@ async def _archive_inbound(db: AsyncSession, conversation: Conversation, update:
 
 async def _archive_event(db: AsyncSession, conversation: Conversation, user_label: str, content: str,
                          update: dict[str, Any]) -> None:
+    metadata = {"update_id": str(update.get("update_id", ""))}
+    if session_id := _support_session_id(conversation):
+        metadata["support_session_id"] = session_id
     db.add(ConversationMessage(
         conversation_id=conversation.id, direction="event", actor_label=user_label,
         content=content[:500], message_kind="interaction",
-        metadata_json={"update_id": str(update.get("update_id", ""))},
+        metadata_json=metadata,
     ))
     conversation.updated_at = now_utc()
 
@@ -209,10 +237,13 @@ async def _queue_ui(db: AsyncSession, conversation: Conversation, text: str,
             ConversationMessage.conversation_id == conversation.id,
             ConversationMessage.provider_message_id == provider_message_id,
         )) or 0) + 1
+    metadata = {"delivery_status": "queued"}
+    if session_id := _support_session_id(conversation):
+        metadata["support_session_id"] = session_id
     message = ConversationMessage(
         conversation_id=conversation.id, provider_message_id=provider_message_id, revision=revision,
         direction="outbound", actor_label="پیام راهنمای تیم", content=body,
-        message_kind="text", metadata_json={"delivery_status": "queued"},
+        message_kind="text", metadata_json=metadata,
     )
     db.add(message)
     await db.flush()
@@ -292,11 +323,13 @@ async def _notify_support_team(db: AsyncSession, conversation: Conversation, ide
 
 def _callback_description(data: str) -> str:
     descriptions = {
-        "c:new": "ثبت درخواست پروژه",
+        "c:new": "ثبت پروژه",
+        "c:track:computer": "انتخاب رشتهٔ کامپیوتر",
         "c:projects": "پیگیری درخواست‌ها",
-        "c:help": "راهنما و ارتباط با تیم",
+        "c:help": "پشتیبانی",
         "c:clear": "پاک‌سازی صفحهٔ گفتگو",
         "c:clear_yes": "تأیید پاک‌سازی صفحهٔ گفتگو",
+        "c:clear_cancel": "انصراف از پاک‌سازی صفحهٔ گفتگو",
         "c:confirm": "تأیید و ثبت درخواست",
         "c:cancel": "لغو فرایند جاری",
         "a:projects": "مشاهدهٔ پروژه‌های واگذارشده",
@@ -306,13 +339,16 @@ def _callback_description(data: str) -> str:
 
 
 async def _show_home(db: AsyncSession, conversation: Conversation, update: dict[str, Any], *, force_send: bool = False,
-                     staff: bool = False, can_view_all: bool = False, notice: str = "") -> None:
+                     staff: bool = False, can_view_all: bool = False, notice: str = "",
+                     greeting: str = "") -> None:
     conversation.state = "home"
     conversation.draft_data = {}
-    text = notice or (
-        "سلام، درخواست‌های پروژه‌ای دانشجویان در رشته‌های مختلف را بررسی می‌کنیم؛ در مرحلهٔ فعلی تمرکز ما روی کامپیوتر و فناوری است. برای ثبت یا پیگیری، یکی از گزینه‌های زیر را انتخاب کن. نتیجه از همین گفتگو اطلاع داده می‌شود."
-        if not staff else "به فضای کاری تیم خوش آمدید. درخواست‌های واگذارشده و صف بررسی از اینجا در دسترس است."
-    )
+    if notice:
+        text = notice
+    elif staff:
+        text = "به فضای کاری تیم خوش آمدید. درخواست‌های واگذارشده و صف بررسی از اینجا در دسترس است."
+    else:
+        text = f"سلام {greeting} 👋 از کجا شروع کنیم؟" if greeting else "سلام 👋 از کجا شروع کنیم؟"
     await _queue_ui(db, conversation, text, _home_keyboard(staff, can_view_all), update, force_send=force_send)
 
 
@@ -394,33 +430,100 @@ async def _project_view(db: AsyncSession, conversation: Conversation, update: di
     await _queue_ui(db, conversation, text, keyboard, update)
 
 
-async def _clear_chat(db: AsyncSession, conversation: Conversation, update: dict[str, Any]) -> None:
-    pending = list((await db.scalars(select(OutboxMessage).where(
-        OutboxMessage.conversation_id == conversation.id,
-        OutboxMessage.status == "pending",
-    ))).all())
-    for queued in pending:
-        queued.status = "canceled"
-        queued.lease_until = None
-        if queued.transcript_message_id:
-            transcript = await db.get(ConversationMessage, queued.transcript_message_id)
-            if transcript:
-                metadata = dict(transcript.metadata_json or {})
-                metadata["delivery_status"] = "canceled"
-                transcript.metadata_json = metadata
+async def _support_history(db: AsyncSession, conversation: Conversation) -> list[ConversationMessage]:
+    session_field = ConversationMessage.metadata_json["support_session_id"].as_string()
+    rows = list((await db.scalars(
+        select(ConversationMessage)
+        .where(
+            ConversationMessage.conversation_id == conversation.id,
+            ConversationMessage.direction.in_(("inbound", "outbound")),
+            session_field.is_not(None),
+        )
+        .order_by(ConversationMessage.created_at.desc(), ConversationMessage.id.desc())
+        .limit(40)
+    )).all())
+    if rows:
+        visible = [row for row in rows if row.actor_label != "پیام راهنمای تیم"]
+        return list(reversed(visible[:8]))
+
+    # Show archived support exchanges created by older releases, before session tags existed.
+    marker = await db.scalar(
+        select(ConversationMessage)
+        .where(
+            ConversationMessage.conversation_id == conversation.id,
+            ConversationMessage.direction == "event",
+            ConversationMessage.content.in_(("راهنما و ارتباط با تیم", "پشتیبانی")),
+        )
+        .order_by(ConversationMessage.created_at.desc(), ConversationMessage.id.desc())
+        .limit(1)
+    )
+    if not marker:
+        return []
+    legacy_rows = list((await db.scalars(
+        select(ConversationMessage)
+        .where(
+            ConversationMessage.conversation_id == conversation.id,
+            ConversationMessage.direction.in_(("inbound", "outbound")),
+            ConversationMessage.created_at >= marker.created_at,
+        )
+        .order_by(ConversationMessage.created_at.desc(), ConversationMessage.id.desc())
+        .limit(40)
+    )).all())
+    visible = [row for row in legacy_rows if row.actor_label != "پیام راهنمای تیم"]
+    return list(reversed(visible[:8]))
+
+
+async def _show_support(db: AsyncSession, conversation: Conversation, update: dict[str, Any], *, notice: str = "") -> None:
+    messages = await _support_history(db, conversation)
+    lines = []
+    for item in messages:
+        speaker = "تو" if item.direction == "inbound" else (item.actor_label or "تیم")
+        content = " ".join(item.content.split())[:360]
+        if content:
+            lines.append(f"{speaker}: {content}")
+    if lines:
+        history = "\n".join(lines)
+        body = f"گفتگوی پشتیبانی\n\n{history}\n\nپیامت رو همین‌جا بفرست؛ پاسخ تیم هم همین‌جا میاد."
+    else:
+        body = "پیامت رو همین‌جا بنویس؛ پاسخ تیم هم همین‌جا میاد."
+    await _queue_ui(db, conversation, notice or body, _support_keyboard(), update)
+
+
+async def _clear_support_messages(db: AsyncSession, conversation: Conversation, update: dict[str, Any]) -> int:
+    session_id = _support_session_id(conversation)
+    if not session_id:
+        return 0
+    session_field = ConversationMessage.metadata_json["support_session_id"].as_string()
+    messages = list((await db.scalars(
+        select(ConversationMessage)
+        .where(
+            ConversationMessage.conversation_id == conversation.id,
+            ConversationMessage.direction.in_(("inbound", "outbound")),
+            ConversationMessage.provider_message_id.is_not(None),
+            ConversationMessage.deleted_from_chat.is_(False),
+            session_field == session_id,
+        )
+        .order_by(ConversationMessage.created_at.desc(), ConversationMessage.id.desc())
+    )).all())
+    existing_delete_ids = set((await db.scalars(
+        select(OutboxMessage.provider_message_id).where(
+            OutboxMessage.conversation_id == conversation.id,
+            OutboxMessage.operation == "delete",
+            OutboxMessage.provider_message_id.is_not(None),
+        )
+    )).all())
+    seen: set[str] = set()
+    deleted_requests = 0
+    for message in messages:
+        if message.actor_label == "پیام راهنمای تیم" or not message.provider_message_id:
+            continue
+        if message.provider_message_id in seen or message.provider_message_id in existing_delete_ids:
+            continue
+        seen.add(message.provider_message_id)
+        await _queue_delete(db, conversation, message, update)
+        deleted_requests += 1
     conversation.cleared_at = now_utc()
-    conversation.state = "home"
-    conversation.ui_message_id = None
-    await _queue_ui(db, conversation,
-                    "درخواست پاک‌سازی صفحه ثبت شد. پیام‌های قابل‌حذف از گفتگو پاک می‌شوند و سوابق لازم برای پیگیری تیم حفظ خواهد شد.",
-                    [[_button("ادامه", "c:home")]], update, force_send=True)
-    provider_ids = list((await db.scalars(select(ConversationMessage.provider_message_id).where(
-        ConversationMessage.conversation_id == conversation.id,
-        ConversationMessage.provider_message_id.is_not(None),
-        ConversationMessage.deleted_from_chat.is_(False),
-    ).distinct())).all())
-    for provider_id in provider_ids:
-        await _queue_delete(db, conversation, None, update, provider_message_id=provider_id)
+    return deleted_requests
 
 
 def _message_kind(message: dict[str, Any]) -> str:
@@ -485,9 +588,10 @@ async def _handle_document(db: AsyncSession, adapter: BotAdapter, conversation: 
     archive_remaining = settings.max_archive_mb * 1024 * 1024 - archived_bytes
     download_limit = min(MAX_TOTAL_UPLOAD_BYTES, archive_remaining)
     if download_limit <= 0 or (provider_size and provider_size > download_limit):
-        await _queue_delete(db, conversation, inbound, update)
+        if conversation.state != "support":
+            await _queue_delete(db, conversation, inbound, update)
         await _queue_ui(db, conversation, f"سقف ذخیرهٔ پیوست‌های این گفتگو ({settings.max_archive_mb} مگابایت) پر شده؛ متن و مشخصات پیام در آرشیو ثبت شد.",
-                        [[_button("منوی اصلی", "c:home")]], update)
+                        _support_keyboard() if conversation.state == "support" else [[_button("منوی اصلی", "c:home")]], update)
         return
     used = sum(int(x.get("size_bytes", 0)) for x in files)
     try:
@@ -496,12 +600,18 @@ async def _handle_document(db: AsyncSession, adapter: BotAdapter, conversation: 
         )
         stored = register_download(path, original_name or provider_name, mime or downloaded_mime)
     except (UploadRejected, ValueError) as exc:
+        if conversation.state != "support":
+            await _queue_delete(db, conversation, inbound, update)
         await _queue_ui(db, conversation, str(exc)[:250],
+                        _support_keyboard() if conversation.state == "support" else
                         [[_button("ادامه بدون فایل", "c:skip_file")]], update)
         return
     except Exception as exc:
         logger.warning("attachment download failed platform=%s error=%s", adapter.platform, type(exc).__name__)
+        if conversation.state != "support":
+            await _queue_delete(db, conversation, inbound, update)
         await _queue_ui(db, conversation, "دریافت فایل انجام نشد. دوباره تلاش کن یا بدون فایل ادامه بده.",
+                        _support_keyboard() if conversation.state == "support" else
                         [[_button("ادامه بدون فایل", "c:skip_file")]], update)
         return
     caption = inbound.content.strip()
@@ -509,7 +619,8 @@ async def _handle_document(db: AsyncSession, adapter: BotAdapter, conversation: 
     db.add(ConversationFile(conversation_id=conversation.id, message_id=inbound.id,
                             stored_key=stored.stored_key, original_name=stored.original_name,
                             mime_type=stored.mime_type, sha256=stored.sha256, size_bytes=stored.size_bytes))
-    await _queue_delete(db, conversation, inbound, update)
+    if conversation.state != "support":
+        await _queue_delete(db, conversation, inbound, update)
     if conversation.state == "attachment" and len(files) < MAX_FILES_PER_PROJECT and used + stored.size_bytes <= MAX_TOTAL_UPLOAD_BYTES:
         files.append({"stored_key": stored.stored_key, "original_name": stored.original_name,
                       "mime_type": stored.mime_type, "sha256": stored.sha256, "size_bytes": stored.size_bytes})
@@ -517,14 +628,14 @@ async def _handle_document(db: AsyncSession, adapter: BotAdapter, conversation: 
         conversation.draft_data = draft
         await _queue_ui(db, conversation, f"فایل {len(files)} از {MAX_FILES_PER_PROJECT} به درخواست پیوست شد.\nمی‌توانی فایل دیگری بفرستی یا به مرحلهٔ بعد بروی.",
                         [[_button("افزودن فایل دیگر", "c:stay_file"), _button("ادامه", "c:skip_file")],
-                         [_button("لغو درخواست", "c:cancel")]], update)
+                         [_button("لغو درخواست", "c:cancel", style="danger")]], update)
     elif conversation.state == "support":
         await _notify_support_team(db, conversation, identity, update)
-        await _queue_ui(db, conversation, f"پیوست «{stored.original_name}» در گفتگوی پشتیبانی ثبت شد. توضیحت را هم می‌توانی در یک پیام بفرستی.",
-                        [[_button("بازگشت به منو", "c:home")]], update)
+        await _queue_ui(db, conversation, f"پیوست «{stored.original_name}» ثبت شد؛ توضیحت را هم همین‌جا بفرست.",
+                        _support_keyboard(), update)
     elif conversation.state == "attachment":
         await _queue_ui(db, conversation, "فایل در آرشیو گفتگو ذخیره شد، اما به‌دلیل محدودیت تعداد یا حجم به درخواست پیوست نشد.",
-                        [[_button("ادامه بدون فایل", "c:skip_file")], [_button("لغو درخواست", "c:cancel")]], update)
+                        [[_button("ادامه بدون فایل", "c:skip_file")], [_button("لغو درخواست", "c:cancel", style="danger")]], update)
     else:
         await _queue_ui(db, conversation, f"پیوست «{stored.original_name}» در آرشیو گفتگوی شما ثبت شد. برای پیوست‌کردن آن به پروژه، ثبت درخواست جدید را آغاز کن.",
                         [[_button("منوی اصلی", "c:home")]], update)
@@ -574,30 +685,51 @@ async def handle_update(db: AsyncSession, platform: str, update: dict[str, Any],
         await _archive_event(db, conversation, _label(user), _callback_description(data), update)
         if data in {"c:home", "a:home"}:
             if not staff:
+                if conversation.state in {"support", "clear_confirm"}:
+                    await _clear_support_messages(db, conversation, update)
                 await _remove_draft_files(conversation)
             await _show_home(db, conversation, update, staff=bool(staff), can_view_all=bool(staff and has_permission(staff.role, "projects.read")))
             return
-        if data == "c:new" and not staff:
-            conversation.state = "title"
+        if data == "c:new" and not staff and conversation.state == "home":
+            conversation.state = "discipline"
             conversation.draft_data = {"files": []}
-            await _queue_ui(db, conversation, "عنوان پروژه یا درخواستت را بنویس.\n\nبرای لغو، دکمهٔ پایین را بزن.",
-                            [[_button("لغو درخواست", "c:cancel")]], update)
+            await _queue_ui(db, conversation, "رشته‌ات رو انتخاب کن",
+                            [[_button("کامپیوتر", "c:track:computer", style="primary")]], update)
+            return
+        if data == "c:track:computer" and not staff and conversation.state == "discipline":
+            draft = dict(conversation.draft_data or {})
+            draft["subject_area"] = "computer"
+            conversation.draft_data = draft
+            conversation.state = "title"
+            await _queue_ui(db, conversation, "عنوان پروژه‌ات رو بنویس.",
+                            [[_button("لغو درخواست", "c:cancel", style="danger")]], update)
             return
         if data == "c:projects" and not staff:
             await _project_list(db, conversation, update, identity.customer_id)
             return
-        if data == "c:help" and not staff:
+        if data == "c:help" and not staff and conversation.state == "home":
             conversation.state = "support"
-            await _queue_ui(db, conversation, "موضوعت را در یک پیام بنویس تا برای پیگیری در گفتگوی همین صفحه ثبت شود.",
-                            [[_button("بازگشت", "c:home")]], update)
+            conversation.draft_data = {"support_session_id": uuid4().hex}
+            await _archive_event(db, conversation, "سیستم", "گفتگوی پشتیبانی باز شد.", update)
+            await _show_support(db, conversation, update)
             return
-        if data == "c:clear" and not staff:
+        if data == "c:clear" and not staff and conversation.state == "support":
             conversation.state = "clear_confirm"
-            await _queue_ui(db, conversation, "پیام‌های قابل حذف از صفحهٔ گفتگو پاک شوند؟ نسخهٔ مدیریتی برای پیگیری باقی می‌ماند.",
-                            [[_button("بله، پاک‌سازی", "c:clear_yes"), _button("انصراف", "c:home")]], update)
+            await _queue_ui(db, conversation,
+                            "پیام‌های این بخش تا جایی که پیام‌رسان اجازه بدهد پاک می‌شوند؛ سابقهٔ تیم باقی می‌ماند.",
+                            [[_button("پاک کردن", "c:clear_yes", style="danger"),
+                              _button("انصراف", "c:clear_cancel")]], update)
             return
-        if data == "c:clear_yes" and not staff:
-            await _clear_chat(db, conversation, update)
+        if data == "c:clear_yes" and not staff and conversation.state == "clear_confirm":
+            await _clear_support_messages(db, conversation, update)
+            conversation.state = "support"
+            await _queue_ui(db, conversation,
+                            "صفحه پاک شد. بعضی پیام‌های قدیمی ممکن است طبق محدودیت پیام‌رسان قابل حذف نباشند؛ آرشیو تیم حفظ شده است.",
+                            _support_keyboard(), update)
+            return
+        if data == "c:clear_cancel" and not staff and conversation.state == "clear_confirm":
+            conversation.state = "support"
+            await _show_support(db, conversation, update)
             return
         if data == "c:cancel" and not staff:
             await _remove_draft_files(conversation)
@@ -607,19 +739,19 @@ async def handle_update(db: AsyncSession, platform: str, update: dict[str, Any],
         if data in {"c:skip_file", "c:stay_file"} and not staff and conversation.state == "attachment":
             if data == "c:stay_file":
                 await _queue_ui(db, conversation, "فایل بعدی را ارسال کن یا ادامه بده.",
-                                [[_button("ادامه", "c:skip_file")], [_button("لغو درخواست", "c:cancel")]], update)
+                                [[_button("ادامه", "c:skip_file")], [_button("لغو درخواست", "c:cancel", style="danger")]], update)
             else:
                 conversation.state = "deadline"
-                await _queue_ui(db, conversation, "اگر زمان تحویل مدنظرت هست بنویس؛ در غیر این صورت «رد شدن» را بزن.",
-                                [[_button("رد شدن", "c:skip_deadline")], [_button("لغو درخواست", "c:cancel")]], update)
+                await _queue_ui(db, conversation, "زمان تحویل مدنظرت چیه؟",
+                                [[_button("رد شدن", "c:skip_deadline")], [_button("لغو درخواست", "c:cancel", style="danger")]], update)
             return
         if data == "c:skip_deadline" and not staff and conversation.state == "deadline":
             draft = dict(conversation.draft_data or {})
             draft["deadline_note"] = ""
             conversation.draft_data = draft
             conversation.state = "budget"
-            await _queue_ui(db, conversation, "بودجهٔ تقریبی به تومان را بنویس؛ اگر فعلاً مشخص نیست، «رد شدن» را بزن.",
-                            [[_button("رد شدن", "c:skip_budget")], [_button("لغو درخواست", "c:cancel")]], update)
+            await _queue_ui(db, conversation, "بودجهٔ تقریبی به تومان چقدره؟",
+                            [[_button("رد شدن", "c:skip_budget")], [_button("لغو درخواست", "c:cancel", style="danger")]], update)
             return
         if data == "c:skip_budget" and not staff and conversation.state == "budget":
             draft = dict(conversation.draft_data or {})
@@ -667,11 +799,16 @@ async def handle_update(db: AsyncSession, platform: str, update: dict[str, Any],
         if message_text.strip().casefold() in {"/menu", "/help"} and inbound:
             await _queue_delete(db, conversation, inbound, update)
         if staff:
-            await _staff_menu(db, conversation, update, staff, force_send=True)
+            await _staff_menu(db, conversation, update, staff)
         else:
-            await _show_home(db, conversation, update, force_send=True)
+            if conversation.state in {"support", "clear_confirm"}:
+                await _clear_support_messages(db, conversation, update)
+            first_name = str(user.get("first_name", "")).strip()[:60]
+            await _show_home(db, conversation, update, greeting=first_name)
         return
     if message_text.strip().casefold() == "/cancel":
+        if not staff and conversation.state in {"support", "clear_confirm"}:
+            await _clear_support_messages(db, conversation, update)
         await _remove_draft_files(conversation)
         await _show_home(db, conversation, update, staff=bool(staff),
                          can_view_all=bool(staff and has_permission(staff.role, "projects.read")),
@@ -684,37 +821,35 @@ async def handle_update(db: AsyncSession, platform: str, update: dict[str, Any],
 
     content = str(message.get("text") or message.get("caption") or "").strip()
     if conversation.state == "support" and content and not _file_from_message(message):
-        await _queue_delete(db, conversation, inbound, update)
         await _notify_support_team(db, conversation, identity, update)
-        conversation.state = "home"
-        await _queue_ui(db, conversation, "پیامت برای پیگیری تیم ثبت شد. پاسخ از همین گفتگو اطلاع داده می‌شود.",
-                        _home_keyboard(), update)
+        await _queue_ui(db, conversation, "پیامت به تیم رسید؛ پاسخ رو همین‌جا می‌بینی.",
+                        _support_keyboard(), update)
         return
     if conversation.state == "title" and content:
         if len(content) < 4 or len(content) > 180:
             await _queue_ui(db, conversation, "عنوان باید بین ۴ تا ۱۸۰ نویسه باشد. دوباره بنویس.",
-                            [[_button("لغو درخواست", "c:cancel")]], update)
+                            [[_button("لغو درخواست", "c:cancel", style="danger")]], update)
             return
         draft = dict(conversation.draft_data or {})
         draft["title"] = content
         conversation.draft_data = draft
         conversation.state = "description"
         await _queue_delete(db, conversation, inbound, update)
-        await _queue_ui(db, conversation, "حالا توضیح بده چه کاری لازم داری و چه خروجی‌ای انتظار داری.\n\nتا ۵۰۰۰ نویسه می‌توانی بنویسی.",
-                        [[_button("لغو درخواست", "c:cancel")]], update)
+        await _queue_ui(db, conversation, "کمی دربارهٔ پروژه و خروجی موردنظرت بگو.",
+                        [[_button("لغو درخواست", "c:cancel", style="danger")]], update)
         return
     if conversation.state == "description" and content:
         if len(content) < 10 or len(content) > MAX_TEXT_CHARS:
             await _queue_ui(db, conversation, "توضیح باید بین ۱۰ تا ۵۰۰۰ نویسه باشد. دوباره بنویس.",
-                            [[_button("لغو درخواست", "c:cancel")]], update)
+                            [[_button("لغو درخواست", "c:cancel", style="danger")]], update)
             return
         draft = dict(conversation.draft_data or {})
         draft["description"] = content
         conversation.draft_data = draft
         conversation.state = "attachment"
         await _queue_delete(db, conversation, inbound, update)
-        await _queue_ui(db, conversation, "اگر نمونه، تصویر یا فایل مرتبط داری بفرست؛ می‌توانی چند فایل اضافه کنی.\nفرمت‌های رایج و فایل‌های کد پذیرفته می‌شوند.",
-                        [[_button("ادامه بدون فایل", "c:skip_file")], [_button("لغو درخواست", "c:cancel")]], update)
+        await _queue_ui(db, conversation, "فایل مرتبطی داری؟ بفرست؛ یا «ادامه» رو بزن.",
+                        [[_button("ادامه بدون فایل", "c:skip_file")], [_button("لغو درخواست", "c:cancel", style="danger")]], update)
         return
     if _file_from_message(message):
         await _handle_document(db, adapter, conversation, message, update, inbound, identity)
@@ -725,15 +860,15 @@ async def handle_update(db: AsyncSession, platform: str, update: dict[str, Any],
         conversation.draft_data = draft
         conversation.state = "budget"
         await _queue_delete(db, conversation, inbound, update)
-        await _queue_ui(db, conversation, "بودجهٔ تقریبی به تومان را بنویس؛ اگر فعلاً مشخص نیست، «رد شدن» را بزن.",
-                        [[_button("رد شدن", "c:skip_budget")], [_button("لغو درخواست", "c:cancel")]], update)
+        await _queue_ui(db, conversation, "بودجهٔ تقریبی به تومان چقدره؟",
+                        [[_button("رد شدن", "c:skip_budget")], [_button("لغو درخواست", "c:cancel", style="danger")]], update)
         return
     if conversation.state == "budget" and content:
         try:
             amount = _parse_budget(content)
         except ValueError as exc:
             await _queue_ui(db, conversation, str(exc),
-                            [[_button("رد شدن", "c:skip_budget")], [_button("لغو درخواست", "c:cancel")]], update)
+                            [[_button("رد شدن", "c:skip_budget")], [_button("لغو درخواست", "c:cancel", style="danger")]], update)
             return
         draft = dict(conversation.draft_data or {})
         draft["budget_toman"] = amount
@@ -752,10 +887,10 @@ async def handle_update(db: AsyncSession, platform: str, update: dict[str, Any],
 
 async def _review_keyboard() -> list[list[dict[str, str]]]:
     return [
-        [_button("تأیید و ثبت درخواست", "c:confirm")],
+        [_button("تأیید و ثبت درخواست", "c:confirm", style="success")],
         [_button("ویرایش عنوان", "c:edit:title"), _button("ویرایش توضیح", "c:edit:description")],
         [_button("ویرایش زمان", "c:edit:deadline"), _button("ویرایش بودجه", "c:edit:budget")],
-        [_button("لغو درخواست", "c:cancel")],
+        [_button("لغو درخواست", "c:cancel", style="danger")],
     ]
 
 
@@ -765,6 +900,7 @@ async def _show_review(db: AsyncSession, conversation: Conversation, update: dic
     budget_text = f"{budget:,} تومان" if budget is not None else "اعلام نشده"
     text = (
         "پیش‌نمایش درخواست\n\n"
+        f"رشته: {'کامپیوتر' if draft.get('subject_area') == 'computer' else 'اعلام‌نشده'}\n"
         f"عنوان: {draft.get('title', '—')}\n\n"
         f"توضیح: {draft.get('description', '—')[:1800]}\n\n"
         f"فایل‌ها: {len(draft.get('files') or [])}\n"
@@ -783,6 +919,7 @@ async def _create_project(db: AsyncSession, conversation: Conversation, customer
     project = Project(
         public_id=f"CP-{uuid4().hex[:12].upper()}", customer_id=customer_id,
         conversation_id=conversation.id, title=str(draft["title"])[:180],
+        subject_area=str(draft.get("subject_area", "computer"))[:40],
         description=str(draft["description"])[:MAX_TEXT_CHARS],
         deadline_note=str(draft.get("deadline_note", ""))[:120],
         budget_toman=draft.get("budget_toman"), status="submitted",
