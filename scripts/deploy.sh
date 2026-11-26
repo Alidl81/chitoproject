@@ -53,6 +53,13 @@ else
   [[ -n "$UV_BIN" ]] || fail "uv executable accessible to chitoproject was not found. Set UV_BIN to its path."
 fi
 [[ -x "$VENV_DIR/bin/python" ]] || fail "the application virtual environment is missing."
+
+# runuser preserves the caller's directory. uv must start where the service user can read its config.
+install_app_package() (
+  cd -- "$APP_DIR" &&
+    runuser -u chitoproject -- "$UV_BIN" pip install --python "$VENV_DIR/bin/python" -e "$APP_DIR"
+)
+
 python3 - "$VENV_DIR/bin/python" "$PYTHON_ROOT" <<'PY'
 import os
 import subprocess
@@ -97,7 +104,7 @@ rollback_on_failure() {
     git -c safe.directory="$REPO_DIR" -C "$REPO_DIR" reset --hard "$OLD_SHA" >/dev/null 2>&1 || true
   fi
   if [[ "$APP_ROLLED_BACK" == 1 && -x "$VENV_DIR/bin/python" && -d "$APP_DIR" ]]; then
-    runuser -u chitoproject -- "$UV_BIN" pip install --python "$VENV_DIR/bin/python" -e "$APP_DIR" >/dev/null 2>&1 || true
+    install_app_package >/dev/null 2>&1 || true
   fi
   for unit in "${ACTIVE_BEFORE[@]}"; do systemctl restart "$unit.service" >/dev/null 2>&1 || true; done
   [[ -z "$EXPECTED_DIR" ]] || rm -rf -- "$EXPECTED_DIR"
@@ -303,7 +310,7 @@ mv -- "$APP_DIR" "$APP_BACKUP"
 APP_SWAPPED=1
 mv -- "$STAGE_DIR" "$APP_DIR"
 
-runuser -u chitoproject -- "$UV_BIN" pip install --python "$VENV_DIR/bin/python" -e "$APP_DIR"
+install_app_package
 runuser -u chitoproject -- bash -c "cd '$APP_DIR' && '$VENV_DIR/bin/python' -m app.cli migrate"
 
 for unit in chitoproject-api chitoproject-worker chitoproject-telegram chitoproject-bale; do
