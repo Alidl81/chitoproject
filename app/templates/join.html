@@ -10,8 +10,8 @@
       <input type="hidden" name="invite_token" data-invite-token value="">
       <label>نام کاربری<input name="username" autocomplete="username" required minlength="3" maxlength="80" pattern="[a-zA-Z0-9_.-]+"></label>
       <label>نام نمایشی<input name="display_name" autocomplete="name" maxlength="160"></label>
-      <label>رمز عبور<input name="password" type="password" autocomplete="new-password" required minlength="14" maxlength="256"></label>
-      <label>تکرار رمز عبور<input name="password_confirm" type="password" autocomplete="new-password" required minlength="14" maxlength="256"></label>
+      <label>رمز عبور<small class="muted">حداقل ۸ نویسه، شامل حرف بزرگ، حرف کوچک، عدد و علامت (مثل !)</small><input name="password" type="password" autocomplete="new-password" required minlength="8" maxlength="256"></label>
+      <label>تکرار رمز عبور<input name="password_confirm" type="password" autocomplete="new-password" required minlength="8" maxlength="256"></label>
       <button class="button primary full" type="submit">پذیرش دعوت</button>
     </form>
   {% else %}

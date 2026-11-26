@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
+import string
 from datetime import UTC, datetime, timedelta
 
 from argon2 import PasswordHasher
@@ -27,8 +28,14 @@ def digest_token(token: str) -> str:
 
 
 def hash_password(password: str) -> str:
-    if len(password) < 14 or len(password) > 256:
-        raise ValueError("رمز عبور باید بین ۱۴ تا ۲۵۶ نویسه باشد")
+    if not (
+        8 <= len(password) <= 256
+        and any(char.isupper() for char in password)
+        and any(char.islower() for char in password)
+        and any(char.isdecimal() for char in password)
+        and any(char in string.punctuation for char in password)
+    ):
+        raise ValueError("رمز عبور باید ۸ تا ۲۵۶ نویسه و دست‌کم یک حرف بزرگ، یک حرف کوچک، یک عدد و یک علامت داشته باشد.")
     return _password_hasher.hash(password)
 
 

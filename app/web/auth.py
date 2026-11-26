@@ -31,7 +31,7 @@ from app.web.common import (
 )
 
 router = APIRouter(prefix="/admin", tags=["admin-auth"])
-_DUMMY_HASH = hash_password("not-a-real-password-for-timing")
+_DUMMY_HASH = hash_password("Not-a-real-password-1-for-timing!")
 
 
 def _aware(value: datetime) -> datetime:

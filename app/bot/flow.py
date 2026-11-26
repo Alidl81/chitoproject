@@ -809,8 +809,8 @@ async def handle_update(db: AsyncSession, platform: str, update: dict[str, Any],
     identity = await _identity(db, platform, user, chat_id, create_customer=not (is_start and start_arg.startswith("link_")))
     staff = await db.get(AdminUser, identity.admin_id) if identity.admin_id else None
     if staff and not staff.active:
-        identity.admin_id = None
-        staff = None
+        # Preserve the linked identity so the owner can restore bot access.
+        return
     conversation = await _conversation(db, identity, platform, chat_id)
 
     if is_start and start_arg.startswith("link_"):

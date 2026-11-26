@@ -7,7 +7,7 @@ from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
-from sqlalchemy import and_, func, insert, or_, select
+from sqlalchemy import and_, delete, func, insert, or_, select
 from sqlalchemy import update as sql_update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -848,19 +848,50 @@ async def create_bot_link(target_id: int, request: Request, db: AsyncSession = D
 
 
 @router.post("/team/{target_id}/deactivate")
-async def deactivate_member(target_id: int, request: Request, db: AsyncSession = Depends(get_session)):
+@router.post("/team/{target_id}/reactivate")
+@router.post("/team/{target_id}/delete")
+async def change_member(target_id: int, request: Request, db: AsyncSession = Depends(get_session)):
     guard = await _guard(request, db, "*", post=True)
     if not isinstance(guard, tuple):
         return guard
-    admin, auth = guard
-    target = await db.get(AdminUser, target_id)
+    admin, _ = guard
+    target = await db.get(AdminUser, target_id, with_for_update=True)
     if admin.role != Role.OWNER.value or not target or target.id == admin.id or target.role == Role.OWNER.value:
-        return redirect("/admin/team", "cannot-deactivate")
+        return redirect("/admin/team", "cannot-manage-member")
+
+    action = request.url.path.rsplit("/", 1)[-1]
+    if action == "reactivate":
+        if not target.active:
+            target.active = True
+            _audit(db, admin, "team.reactivated", "admin", str(target.id), {})
+        await db.commit()
+        return redirect("/admin/team", "member-reactivated")
+
     target.active = False
     target.session_version += 1
-    _audit(db, admin, "team.deactivated", "admin", str(target.id), {})
+    await db.execute(delete(AdminSession).where(AdminSession.admin_id == target.id))
+    await db.execute(delete(BotLinkChallenge).where(BotLinkChallenge.admin_id == target.id))
+    # Cancel outstanding team notices before removing the chat's staff association.
+    staff_chats = select(Conversation.id).where(Conversation.admin_id == target.id)
+    await db.execute(sql_update(OutboxMessage).where(
+        OutboxMessage.conversation_id.in_(staff_chats),
+        OutboxMessage.status.in_(("pending", "processing")),
+    ).values(status="canceled", body="", keyboard=None, lease_until=None))
+    await db.execute(sql_update(Conversation).where(Conversation.admin_id == target.id)
+                     .values(state="home", draft_data={}, ui_message_id=None))
+
+    if action == "delete":
+        # Invitations reference their creator with ON DELETE RESTRICT.
+        await db.execute(delete(AdminInvite).where(AdminInvite.created_by == target.id))
+        _audit(db, admin, "team.deleted", "admin", str(target.id), {})
+        await db.delete(target)
+        notice = "member-deleted"
+    else:
+        await db.execute(delete(AdminInvite).where(AdminInvite.created_by == target.id, AdminInvite.used_at.is_(None)))
+        _audit(db, admin, "team.deactivated", "admin", str(target.id), {})
+        notice = "member-deactivated"
     await db.commit()
-    return redirect("/admin/team", "member-deactivated")
+    return redirect("/admin/team", notice)
 
 
 @router.get("/profile")

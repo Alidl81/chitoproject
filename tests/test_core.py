@@ -609,9 +609,12 @@ def test_roles_and_password_hashing() -> None:
     assert has_permission(Role.SUPPORT, "messages.reply")
     assert not has_permission(Role.SUPPORT, "projects.read")
     assert not has_permission("unknown", "projects.read")
-    password_hash = hash_password("very-long-test-password")
-    assert verify_password("very-long-test-password", password_hash)
+    password_hash = hash_password("Sample1!")
+    assert verify_password("Sample1!", password_hash)
     assert not verify_password("incorrect-password", password_hash)
+    for weak in ("Short1!", "sample1!", "SAMPLE1!", "Sample!!", "Sample12"):
+        with pytest.raises(ValueError):
+            hash_password(weak)
     assert digest_token("opaque-token") != digest_token("other-token")
 
 

@@ -39,7 +39,7 @@ async def issue_owner_code() -> None:
 
 
 async def reset_password(username: str) -> None:
-    temporary_password = random_token(24)
+    temporary_password = "Aa1!" + random_token(24)
     async with SessionLocal() as session:
         admin = await session.scalar(select(AdminUser).where(AdminUser.username == username))
         if not admin:
