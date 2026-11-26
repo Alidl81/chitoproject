@@ -912,3 +912,34 @@ async def test_assignment_schedules_two_reminders_and_team_contact_can_reply(db_
     forwarded = await db.scalar(select(OutboxMessage).where(OutboxMessage.dedupe_key == "team:telegram:972"))
     assert (forwarded.platform, forwarded.chat_id) == ("bale", "851")
     assert forwarded.keyboard[0][0]["callback_data"] == f"a:peer:{dev.id}"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_excludes_archived_projects_and_their_customers(db_context, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from app.web import admin as admin_panel
+
+    db, _ = db_context
+    owner = AdminUser(username="dashboard-owner", role=Role.OWNER.value, password_hash="unused")
+    visible = Customer(display_name="Visible")
+    archived = Customer(display_name="Archived")
+    db.add_all([owner, visible, archived])
+    await db.flush()
+    for index, (customer, status) in enumerate(((visible, "reviewing"), (archived, "completed"), (archived, "submitted"))):
+        chat = Conversation(platform="telegram", chat_id=f"dashboard-{index}", customer_id=customer.id)
+        db.add(chat)
+        await db.flush()
+        db.add(Project(public_id=f"CP-DASH-{index}", title=f"Project {index}", description="Dashboard",
+                       conversation_id=chat.id, customer_id=customer.id, status=status,
+                       archived_at=now_utc() if customer is archived else None))
+
+    async def allow(request, session):
+        return owner, SimpleNamespace(csrf_token="test-csrf")
+
+    monkeypatch.setattr(admin_panel, "_guard", allow)
+    monkeypatch.setattr(admin_panel, "_page", lambda *args, **context: context)
+    overview = await admin_panel.dashboard(None, db)
+    assert overview["total"] == overview["active_projects"] == overview["total_customers"] == 1
+    assert overview["counts"] == {"reviewing": 1}
+    assert [p.public_id for p in overview["recent"]] == ["CP-DASH-0"]

@@ -173,16 +173,18 @@ async def dashboard(request: Request, db: AsyncSession = Depends(get_session)):
         return _page(request, "error.html", admin, auth, status_code=403,
                      title="دسترسی مجاز نیست", message="برای حساب شما بخش مدیریتی فعالی تعریف نشده است.")
     unread = int(await db.scalar(unread_messages(admin.id)) or 0) if chat_access else None
-    scope = [Project.assigned_admin_id == admin.id] if admin.role == Role.CONTRIBUTOR.value else []
+    scope = [Project.archived_at.is_(None)]
     if not project_access:
-        scope = [Project.id.is_(None)]
-    total = int(await db.scalar(select(func.count(Project.id)).where(*scope)) or 0)
-    counts = {status: int(await db.scalar(select(func.count(Project.id)).where(Project.status == status, *scope)) or 0)
-              for status in STATUS_LABELS}
-    active_projects = int(await db.scalar(select(func.count(Project.id)).where(
-        Project.status.in_(["submitted", "reviewing", "needs_info", "in_progress"]), *scope)) or 0)
+        scope.append(Project.id.is_(None))
+    elif admin.role == Role.CONTRIBUTOR.value:
+        scope.append(Project.assigned_admin_id == admin.id)
+    counts = dict((await db.execute(
+        select(Project.status, func.count(Project.id)).where(*scope).group_by(Project.status)
+    )).all())
+    total = sum(counts.values())
+    active_projects = sum(counts.get(status, 0) for status in ("submitted", "reviewing", "needs_info", "in_progress"))
     total_customers = int(await db.scalar(select(func.count(func.distinct(Project.customer_id))).where(*scope)) or 0)
-    recent = list((await db.scalars(select(Project).where(*scope, Project.archived_at.is_(None)).order_by(Project.updated_at.desc()).limit(8))).all())
+    recent = list(await db.scalars(select(Project).where(*scope).order_by(Project.updated_at.desc()).limit(8)))
     members = int(await db.scalar(select(func.count(AdminUser.id)).where(AdminUser.active.is_(True))) or 0) if has_permission(admin.role, "team.invite") else None
     return _page(request, "dashboard.html", admin, auth, total=total, counts=counts,
                  active_projects=active_projects, total_customers=total_customers,

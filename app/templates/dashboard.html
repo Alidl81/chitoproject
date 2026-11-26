@@ -12,10 +12,10 @@
 {% if can_reports %}<a class="button secondary" href="/admin/stats">گزارش آماری ربات</a>{% endif %}
 {% if can_projects %}
 <div class="stat-grid">
-  <article class="stat-card accent-amber"><span class="stat-symbol">◈</span><span class="stat-label">همهٔ درخواست‌ها</span><strong>{{ total }}</strong><small>از ابتدا تا امروز</small></article>
+  <article class="stat-card accent-amber"><span class="stat-symbol">◈</span><span class="stat-label">درخواست‌های موجود</span><strong>{{ total }}</strong><small>در فهرست پروژه‌ها</small></article>
   <article class="stat-card accent-blue"><span class="stat-symbol">◷</span><span class="stat-label">در جریان</span><strong>{{ active_projects }}</strong><small>منتظر بررسی یا اجرا</small></article>
-  <article class="stat-card accent-cyan"><span class="stat-symbol">◎</span><span class="stat-label">وضعیت‌ها</span><strong>{{ counts.get('completed', 0) }}</strong><small>درخواست تکمیل‌شده</small></article>
-  <article class="stat-card accent-red"><span class="stat-symbol">♧</span><span class="stat-label">مشتری‌ها</span><strong>{{ total_customers }}</strong><small>گفتگوهای خصوصی ثبت‌شده</small></article>
+  <article class="stat-card accent-cyan"><span class="stat-symbol">◎</span><span class="stat-label">تکمیل‌شده</span><strong>{{ counts.get('completed', 0) }}</strong><small>درخواست تکمیل‌شده</small></article>
+  <article class="stat-card accent-red"><span class="stat-symbol">♧</span><span class="stat-label">مشتری‌ها</span><strong>{{ total_customers }}</strong><small>مشتریانِ درخواست‌های موجود</small></article>
 </div>
 <div class="content-grid">
   <section class="panel-card">
