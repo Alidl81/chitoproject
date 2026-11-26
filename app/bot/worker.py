@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import secrets
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
@@ -17,6 +18,7 @@ from app.config import settings
 from app.database import SessionLocal
 from app.models import (
     Conversation,
+    ConversationFile,
     ConversationMessage,
     IncomingUpdate,
     OutboxMessage,
@@ -228,6 +230,20 @@ async def _dispatch_outbox(row_id: int, adapters: dict[str, BotAdapter]) -> bool
             if operation == "send":
                 sent_id = await adapter.send_message(row.chat_id, row.body, row.keyboard)
                 message_id = sent_id
+            elif operation == "document":
+                archived = await session.scalar(select(ConversationFile).where(
+                    ConversationFile.message_id == row.transcript_message_id,
+                    ConversationFile.conversation_id == row.conversation_id,
+                )) if transcript else None
+                if not archived or not re.fullmatch(r"[a-f0-9]{32}", archived.stored_key):
+                    raise ProviderError("missing_document", permanent=True)
+                root = settings.uploads_dir.resolve()
+                path = (root / archived.stored_key).resolve()
+                if path.parent != root or not path.is_file():
+                    raise ProviderError("missing_document", permanent=True)
+                message_id = await adapter.send_document(
+                    row.chat_id, path, archived.original_name, archived.mime_type, row.body,
+                )
             elif operation == "edit":
                 if not message_id:
                     raise ProviderError("missing_edit_target", permanent=True)
@@ -255,7 +271,7 @@ async def _dispatch_outbox(row_id: int, adapters: dict[str, BotAdapter]) -> bool
                 meta = dict(transcript.metadata_json or {})
                 meta["delivery_status"] = "sent"
                 transcript.metadata_json = meta
-                if operation in {"send", "edit"}:
+                if operation in {"send", "edit", "document"}:
                     if transcript.provider_message_id != message_id and message_id:
                         current_revision = await session.scalar(select(func.max(ConversationMessage.revision)).where(
                             ConversationMessage.conversation_id == transcript.conversation_id,

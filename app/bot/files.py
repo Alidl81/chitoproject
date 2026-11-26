@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import mimetypes
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 from uuid import uuid4
 
 from app.config import settings
@@ -95,3 +97,24 @@ def register_download(path: Path, provider_name: str, declared_mime: str | None 
     if path.resolve() != target:
         path.replace(target)
     return StoredUpload(key, name, detected, digest.hexdigest(), size, target)
+
+
+# Keep document transfers within both providers' supported sizes.
+MAX_DOCUMENT_CAPTION = 1024
+
+
+def save_document(source: BinaryIO, name: str, byte_limit: int) -> StoredUpload:
+    root = settings.uploads_dir.resolve()
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temp = root / uuid4().hex
+    try:
+        size = 0
+        with open(temp, "xb", opener=lambda path, flags: os.open(path, flags, 0o600)) as target:
+            while chunk := source.read(128 * 1024):
+                size += len(chunk)
+                if size > byte_limit:
+                    raise UploadRejected("حجم فایل بیشتر از سقف مجاز است.")
+                target.write(chunk)
+        return register_download(temp, name)
+    finally:
+        temp.unlink(missing_ok=True)

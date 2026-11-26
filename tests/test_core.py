@@ -506,6 +506,24 @@ async def test_admin_conversation_page_renders_and_csrf_is_enforced(db_context) 
             rejected = await client.post("/admin/team/invites", data={"role": "reviewer"})
             assert rejected.status_code == 403
 
+            endpoint = f"/admin/conversations/{conversation.id}/reply"
+            invalid = await client.post(
+                endpoint, data={"csrf_token": session_csrf},
+                files={"file": ("invalid.exe", b"data", "application/octet-stream")},
+            )
+            assert "notice=reply-file-rejected" in invalid.headers["location"]
+            queued = await client.post(
+                endpoint, data={"csrf_token": session_csrf},
+                files={"file": ("delivery.pdf", b"%PDF-1.4 test", "application/pdf")},
+            )
+            assert "notice=reply-queued" in queued.headers["location"]
+            async with maker() as verification:
+                job = await verification.scalar(select(OutboxMessage).where(OutboxMessage.operation == "document"))
+                archived_file = await verification.scalar(select(ConversationFile).where(
+                    ConversationFile.message_id == job.transcript_message_id,
+                ))
+                assert job.chat_id == "88" and archived_file.original_name == "delivery.pdf"
+
             deleted = await client.post(
                 f"/admin/conversations/{conversation.id}/delete-transcript",
                 data={"csrf_token": session_csrf},
@@ -669,3 +687,61 @@ def test_upload_validation_and_private_random_name(tmp_path: Path, monkeypatch) 
     with pytest.raises(UploadRejected):
         register_download(bad, "bad.exe", "application/octet-stream")
     assert not bad.exists()
+
+
+@pytest.mark.asyncio
+async def test_staff_document_requires_project_assignment_and_targets_customer(db_context, monkeypatch) -> None:
+    from app.bot import worker
+
+    session, maker = db_context
+    staff = AdminUser(username="sender", password_hash="unused", role=Role.CONTRIBUTOR.value)
+    customer = Customer(display_name="Customer")
+    session.add_all([staff, customer])
+    await session.flush()
+    conversation = Conversation(platform="bale", chat_id="customer-chat", customer_id=customer.id)
+    session.add_all([conversation, PlatformIdentity(
+        platform="telegram", provider_user_id="91", chat_id="91", admin_id=staff.id,
+    )])
+    await session.flush()
+    project = Project(public_id="CP-FILE", customer_id=customer.id, conversation_id=conversation.id,
+                      title="IoT", description="Delivery test")
+    session.add(project)
+    await session.flush()
+
+    class FileAdapter(FakeAdapter):
+        async def download_to(self, file_id, destination_dir, max_bytes):
+            path = destination_dir / "incoming-delivery"
+            raw = b"%PDF-1.4 test"
+            path.write_bytes(raw)
+            return path, "report.pdf", "application/pdf", len(raw)
+
+        async def send_document(self, chat_id, path, filename, mime_type, caption):
+            self.sent.append((chat_id, caption))
+            assert path.read_bytes() == b"%PDF-1.4 test"
+            assert filename == "report.pdf" and mime_type == "application/pdf"
+            return "1234"
+
+    adapter = FileAdapter()
+    def document_update(update_id):
+        update = _message_update(update_id, 91, "")
+        update["message"].update(document={"file_id": "sample", "file_name": "report.pdf",
+                                            "mime_type": "application/pdf"}, caption="تحویل پروژه")
+        return update
+
+    await handle_update(session, "telegram", _callback_update(201, 91, "a:file:CP-FILE"), adapter)
+    await handle_update(session, "telegram", document_update(202), adapter)
+    assert await session.scalar(select(OutboxMessage).where(OutboxMessage.operation == "document")) is None
+    project.assigned_admin_id = staff.id
+    await session.flush()
+    await handle_update(session, "telegram", _callback_update(203, 91, "a:file:CP-FILE"), adapter)
+    await handle_update(session, "telegram", document_update(204), adapter)
+    job = await session.scalar(select(OutboxMessage).where(OutboxMessage.operation == "document"))
+    assert (job.platform, job.chat_id) == ("bale", "customer-chat")
+    job.status = "processing"
+    await session.commit()
+    monkeypatch.setattr(worker, "SessionLocal", maker)
+    assert await worker._dispatch_outbox(job.id, {"bale": adapter})
+    assert adapter.sent == [("customer-chat", "تحویل پروژه")]
+    session.expire_all()
+    delivered = await session.scalar(select(ConversationMessage).where(ConversationMessage.provider_message_id == "1234"))
+    assert delivered.metadata_json["delivery_status"] == "sent"

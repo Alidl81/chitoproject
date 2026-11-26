@@ -52,9 +52,10 @@ class BotAdapter:
         # the same enum values and platform-specific color rendering.
         return keyboard
 
-    async def _api(self, method: str, payload: dict[str, Any] | None = None) -> Any:
+    async def _api(self, method: str, payload: dict[str, Any] | None = None, *, files: dict[str, Any] | None = None) -> Any:
         try:
-            response = await self.http.post(f"{self.api_base}/bot{self.token}/{method}", json=payload or {})
+            request = {"data": payload or {}, "files": files} if files else {"json": payload or {}}
+            response = await self.http.post(f"{self.api_base}/bot{self.token}/{method}", **request)
             response.raise_for_status()
             body = response.json()
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
@@ -93,6 +94,14 @@ class BotAdapter:
         if keyboard:
             payload["reply_markup"] = {"inline_keyboard": self._keyboard(keyboard)}
         result = await self._api("sendMessage", payload)
+        return str(result["message_id"])
+
+    async def send_document(self, chat_id: str, path: Path, filename: str, mime_type: str, caption: str) -> str:
+        with path.open("rb") as document:
+            result = await self._api(
+                "sendDocument", {"chat_id": chat_id, "caption": caption},
+                files={"document": (filename, document, mime_type)},
+            )
         return str(result["message_id"])
 
     async def edit_message_text(self, chat_id: str, message_id: str, text: str, keyboard: list[list[dict[str, str]]] | None = None) -> None:

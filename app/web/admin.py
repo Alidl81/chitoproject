@@ -3,13 +3,21 @@ from __future__ import annotations
 import asyncio
 import re
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from sqlalchemy import func, or_, select
 from sqlalchemy import update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.files import safe_filename
+from app.bot.files import (
+    MAX_DOCUMENT_CAPTION,
+    StoredUpload,
+    UploadRejected,
+    safe_filename,
+    save_document,
+)
+from app.bot.flow import document_budget
+from app.bot.flow import queue_customer_message as _queue_customer_message
 from app.config import settings
 from app.database import get_session
 from app.models import (
@@ -106,37 +114,6 @@ async def _project_scope(db: AsyncSession, admin: AdminUser, project_id: str) ->
     if admin.role == Role.CONTRIBUTOR.value and project.assigned_admin_id != admin.id:
         return None
     return project
-
-
-async def _queue_customer_message(db: AsyncSession, conversation: Conversation, admin: AdminUser,
-                                  body: str, key: str) -> ConversationMessage:
-    conversation.updated_at = now_utc()
-    session_field = ConversationMessage.metadata_json["support_session_id"].as_string()
-    support_session_id = await db.scalar(
-        select(session_field)
-        .where(
-            ConversationMessage.conversation_id == conversation.id,
-            session_field.is_not(None),
-        )
-        .order_by(ConversationMessage.created_at.desc(), ConversationMessage.id.desc())
-        .limit(1)
-    )
-    metadata = {"delivery_status": "queued"}
-    if support_session_id:
-        metadata["support_session_id"] = str(support_session_id)
-    message = ConversationMessage(
-        conversation_id=conversation.id, direction="outbound",
-        actor_label=admin.display_name or admin.username,
-        content=body[:4000], message_kind="text", metadata_json=metadata,
-    )
-    db.add(message)
-    await db.flush()
-    db.add(OutboxMessage(
-        dedupe_key=key[:160], platform=conversation.platform, chat_id=conversation.chat_id,
-        conversation_id=conversation.id, transcript_message_id=message.id, operation="send",
-        body=body[:4000], keyboard=None,
-    ))
-    return message
 
 
 async def _queue_assignee_notice(db: AsyncSession, project: Project, member: AdminUser) -> None:
@@ -239,9 +216,13 @@ async def project_detail(project_id: str, request: Request, db: AsyncSession = D
     events.reverse()
     attachments = list((await db.scalars(select(Attachment).where(Attachment.project_id == project.id)
                                          .order_by(Attachment.created_at))).all())
+    transcript_files = list((await db.scalars(select(ConversationFile).where(
+        ConversationFile.message_id.in_([message.id for message in transcript]),
+        ConversationFile.conversation_id == project.conversation_id,
+    ))).all())
     members = list((await db.scalars(select(AdminUser).where(AdminUser.active.is_(True)).order_by(AdminUser.display_name, AdminUser.username))).all()) if has_permission(admin.role, "projects.manage") else []
     return _page(request, "project_detail.html", admin, auth, project=project, customer=customer,
-                 conversation=conversation, transcript=transcript, events=events, attachments=attachments,
+                 conversation=conversation, transcript=transcript, transcript_files=transcript_files, events=events, attachments=attachments,
                  members=members, status_labels=STATUS_LABELS, can_manage=has_permission(admin.role, "projects.manage"),
                  can_reply=has_permission(admin.role, "messages.reply"), can_review=has_permission(admin.role, "projects.review"))
 
@@ -300,25 +281,49 @@ async def project_assign(project_id: str, request: Request, db: AsyncSession = D
     return redirect(f"/admin/projects/{project.id}", "assigned")
 
 
+async def _save_reply_document(db: AsyncSession, conversation: Conversation, file: UploadFile | None,
+                               caption: str) -> StoredUpload | None:
+    if not file or not file.filename:
+        return None
+    limit = await document_budget(db, conversation)
+    if limit <= 0 or len(caption) > MAX_DOCUMENT_CAPTION:
+        raise UploadRejected()
+    return await asyncio.to_thread(save_document, file.file, file.filename, limit)
+
+
+async def _commit_reply(db: AsyncSession, document: StoredUpload | None) -> None:
+    try:
+        await db.commit()
+    except Exception:
+        if document:
+            document.path.unlink(missing_ok=True)
+        raise
+
+
 @router.post("/projects/{project_id}/reply")
 async def project_reply(project_id: str, request: Request, db: AsyncSession = Depends(get_session),
-                        body: str = Form("")):
+                        body: str = Form(""), file: UploadFile | None = File(None)):
     guard = await _guard(request, db, "messages.reply", post=True)
     if not isinstance(guard, tuple):
         return guard
     admin, auth = guard
     project = await _project_scope(db, admin, project_id)
     text = body.strip()
-    if not project or not text:
+    if not project or (not text and not (file and file.filename)):
         return redirect(f"/admin/projects/{project_id}", "empty-reply")
     conversation = await db.get(Conversation, project.conversation_id)
-    if not conversation:
+    if not conversation or conversation.customer_id != project.customer_id:
         return redirect(f"/admin/projects/{project.id}", "conversation-missing")
-    await _queue_customer_message(db, conversation, admin, text, f"admin-reply:{project.id}:{random_token(12)}")
+    target = f"/admin/projects/{project.id}"
+    try:
+        document = await _save_reply_document(db, conversation, file, text)
+    except UploadRejected:
+        return redirect(target, "reply-file-rejected")
+    await _queue_customer_message(db, conversation, admin, text, f"admin-reply:{project.id}:{random_token(12)}", document=document)
     db.add(ProjectEvent(project_id=project.id, actor_type="admin", actor_id=str(admin.id), event_type="reply",
-                        note=text[:1000], private=False))
+                        note=(text or (document.original_name if document else ""))[:1000], private=False))
     _audit(db, admin, "project.reply", "project", project.id, {})
-    await db.commit()
+    await _commit_reply(db, document)
     return redirect(f"/admin/projects/{project.id}", "reply-queued")
 
 
@@ -419,23 +424,28 @@ async def conversation_detail(conversation_id: str, request: Request, db: AsyncS
 
 @router.post("/conversations/{conversation_id}/reply")
 async def conversation_reply(conversation_id: str, request: Request, db: AsyncSession = Depends(get_session),
-                             body: str = Form("")):
+                             body: str = Form(""), file: UploadFile | None = File(None)):
     guard = await _guard(request, db, "messages.reply", post=True)
     if not isinstance(guard, tuple):
         return guard
     admin, auth = guard
     conversation = await db.get(Conversation, conversation_id)
     text = body.strip()
-    if not conversation or not conversation.customer_id or not text:
+    if not conversation or not conversation.customer_id or (not text and not (file and file.filename)):
         return redirect(f"/admin/conversations/{conversation_id}", "empty-reply")
     project = await db.scalar(select(Project).where(Project.conversation_id == conversation.id))
     if admin.role == Role.CONTRIBUTOR.value and (not project or project.assigned_admin_id != admin.id):
         return _page(request, "error.html", admin, auth, status_code=403, title="دسترسی مجاز نیست", message="این گفتگو در دسترس شما نیست.")
-    await _queue_customer_message(db, conversation, admin, text, f"conversation-reply:{conversation.id}:{random_token(12)}")
+    target = f"/admin/conversations/{conversation.id}"
+    try:
+        document = await _save_reply_document(db, conversation, file, text)
+    except UploadRejected:
+        return redirect(target, "reply-file-rejected")
+    await _queue_customer_message(db, conversation, admin, text, f"conversation-reply:{conversation.id}:{random_token(12)}", document=document)
     if project:
-        db.add(ProjectEvent(project_id=project.id, actor_type="admin", actor_id=str(admin.id), event_type="reply", note=text[:1000], private=False))
+        db.add(ProjectEvent(project_id=project.id, actor_type="admin", actor_id=str(admin.id), event_type="reply", note=(text or (document.original_name if document else ""))[:1000], private=False))
     _audit(db, admin, "conversation.reply", "conversation", conversation.id, {})
-    await db.commit()
+    await _commit_reply(db, document)
     return redirect(f"/admin/conversations/{conversation.id}", "reply-queued")
 
 
@@ -501,14 +511,21 @@ async def download_attachment(attachment_id: str, request: Request, db: AsyncSes
 
 @router.get("/conversation-files/{file_id}")
 async def download_conversation_file(file_id: str, request: Request, db: AsyncSession = Depends(get_session)):
-    guard = await _guard(request, db, "customers.read")
+    guard = await _guard(request, db)
     if not isinstance(guard, tuple):
         return guard
     admin, auth = guard
     archived = await db.get(ConversationFile, file_id)
     conversation = await db.get(Conversation, archived.conversation_id) if archived else None
     project = await db.scalar(select(Project).where(Project.conversation_id == conversation.id)) if conversation else None
-    if not archived or not conversation or (admin.role == Role.CONTRIBUTOR.value and (not project or project.assigned_admin_id != admin.id)):
+    can_download = has_permission(admin.role, "customers.read") or (
+        project is not None and (
+            has_permission(admin.role, "projects.read") or (
+                has_permission(admin.role, "projects.assigned.read") and project.assigned_admin_id == admin.id
+            )
+        )
+    )
+    if not archived or not conversation or not can_download:
         return _page(request, "error.html", admin, auth, status_code=404, title="فایل پیدا نشد", message="این فایل در دسترس نیست.")
     if not re.fullmatch(r"[a-f0-9]{32}", archived.stored_key):
         return Response(status_code=404)

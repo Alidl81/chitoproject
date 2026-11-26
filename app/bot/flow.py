@@ -10,8 +10,8 @@ from uuid import uuid4
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.files import UploadRejected, register_download
-from app.bot.transport import BotAdapter
+from app.bot.files import MAX_DOCUMENT_CAPTION, StoredUpload, UploadRejected, register_download
+from app.bot.transport import BotAdapter, ProviderError
 from app.config import settings
 from app.models import (
     AdminUser,
@@ -407,13 +407,22 @@ async def _project_list(db: AsyncSession, conversation: Conversation, update: di
     await _queue_ui(db, conversation, text, keyboard, update)
 
 
+def _staff_project_scope(query, staff: AdminUser):
+    if not has_permission(staff.role, "projects.read"):
+        return query.where(Project.assigned_admin_id == staff.id)
+    return query
+
+
 async def _project_view(db: AsyncSession, conversation: Conversation, update: dict[str, Any], public_id: str,
                         customer_id: str | None = None, staff: AdminUser | None = None) -> None:
+    if staff:
+        conversation.state = "home"
+        conversation.draft_data = {}
     query = select(Project).where(Project.public_id == public_id)
     if customer_id:
         query = query.where(Project.customer_id == customer_id)
-    if staff and staff.role == Role.CONTRIBUTOR.value:
-        query = query.where(Project.assigned_admin_id == staff.id)
+    if staff:
+        query = _staff_project_scope(query, staff)
     project = await db.scalar(query)
     if not project:
         await _queue_ui(db, conversation, "این درخواست در دسترس نیست.",
@@ -427,6 +436,8 @@ async def _project_view(db: AsyncSession, conversation: Conversation, update: di
     )
     keyboard = [[_button("بازگشت به فهرست", "a:projects" if staff else "c:projects")],
                 [_button("منوی اصلی", "a:home" if staff else "c:home")]]
+    if staff and has_permission(staff.role, "messages.reply"):
+        keyboard.insert(0, [_button("ارسال فایل به مشتری", f"a:file:{project.public_id}", style="primary")])
     await _queue_ui(db, conversation, text, keyboard, update)
 
 
@@ -575,6 +586,52 @@ async def _stored_bytes_for_conversation(db: AsyncSession, conversation_id: str)
     return transcript_bytes + project_bytes
 
 
+async def document_budget(db: AsyncSession, conversation: Conversation) -> int:
+    await db.execute(select(Conversation.id).where(Conversation.id == conversation.id).with_for_update())
+    used = await _stored_bytes_for_conversation(db, conversation.id)
+    limit = min(settings.max_upload_mb, 20) * 1024 * 1024
+    return max(0, min(limit, settings.max_archive_mb * 1024 * 1024 - used))
+
+
+async def queue_customer_message(db: AsyncSession, conversation: Conversation, admin: AdminUser,
+                                  body: str, key: str, *, document: StoredUpload | None = None) -> ConversationMessage:
+    conversation.updated_at = now_utc()
+    session_field = ConversationMessage.metadata_json["support_session_id"].as_string()
+    support_session_id = await db.scalar(
+        select(session_field)
+        .where(
+            ConversationMessage.conversation_id == conversation.id,
+            session_field.is_not(None),
+        )
+        .order_by(ConversationMessage.created_at.desc(), ConversationMessage.id.desc())
+        .limit(1)
+    )
+    metadata = {"delivery_status": "queued"}
+    if support_session_id:
+        metadata["support_session_id"] = str(support_session_id)
+    caption = body[:MAX_DOCUMENT_CAPTION] if document else body[:4000]
+    kind = "document" if document else "text"
+    message = ConversationMessage(
+        conversation_id=conversation.id, direction="outbound",
+        actor_label=admin.display_name or admin.username,
+        content=caption or (document.original_name if document else ""), message_kind=kind, metadata_json=metadata,
+    )
+    db.add(message)
+    await db.flush()
+    if document:
+        db.add(ConversationFile(
+            conversation_id=conversation.id, message_id=message.id, stored_key=document.stored_key,
+            original_name=document.original_name, mime_type=document.mime_type,
+            sha256=document.sha256, size_bytes=document.size_bytes,
+        ))
+    db.add(OutboxMessage(
+        dedupe_key=key[:160], platform=conversation.platform, chat_id=conversation.chat_id,
+        conversation_id=conversation.id, transcript_message_id=message.id, operation="document" if document else "send",
+        body=caption, keyboard=None,
+    ))
+    return message
+
+
 async def _handle_document(db: AsyncSession, adapter: BotAdapter, conversation: Conversation,
                            message: dict[str, Any], update: dict[str, Any], inbound: ConversationMessage,
                            identity: PlatformIdentity) -> None:
@@ -639,6 +696,42 @@ async def _handle_document(db: AsyncSession, adapter: BotAdapter, conversation: 
     else:
         await _queue_ui(db, conversation, f"پیوست «{stored.original_name}» در آرشیو گفتگوی شما ثبت شد. برای پیوست‌کردن آن به پروژه، ثبت درخواست جدید را آغاز کن.",
                         [[_button("منوی اصلی", "c:home")]], update)
+
+
+async def _staff_send_file(db: AsyncSession, adapter: BotAdapter, staff: AdminUser,
+                           conversation: Conversation, message: dict[str, Any], update: dict[str, Any]) -> None:
+    public_id = (conversation.draft_data or {}).get("delivery_project")
+    query = _staff_project_scope(select(Project).where(Project.public_id == public_id), staff)
+    project = await db.scalar(query.with_for_update()) if has_permission(staff.role, "messages.reply") else None
+    customer = await db.get(Conversation, project.conversation_id) if project else None
+    if not project or not customer or customer.customer_id != project.customer_id:
+        await _staff_menu(db, conversation, update, staff, notice="این پروژه در دسترس نیست.")
+        return
+    keyboard = [[_button("لغو ارسال", "a:home")]]
+    item = _file_from_message(message)
+    if not item:
+        await _queue_ui(db, conversation, "فایل را از گزینهٔ پیوست بفرستید.", keyboard, update)
+        return
+    file_id, name, mime, size, _ = item
+    caption = str(message.get("caption") or "").strip()
+    limit = await document_budget(db, customer)
+    if not limit or size > limit or len(caption) > MAX_DOCUMENT_CAPTION:
+        await _queue_ui(db, conversation, "حجم فایل یا طول توضیح بیشتر از سقف مجاز است.", keyboard, update)
+        return
+    path = None
+    try:
+        path, _, _, _ = await adapter.download_to(file_id, settings.uploads_dir, limit)
+        document = register_download(path, name, mime)
+    except (UploadRejected, OSError, ValueError, ProviderError):
+        if path:
+            path.unlink(missing_ok=True)
+        await _queue_ui(db, conversation, "فایل دریافت نشد یا نوع آن مجاز نیست. دوباره امتحان کنید.", keyboard, update)
+        return
+    await queue_customer_message(db, customer, staff, caption or f"فایل پروژهٔ {project.public_id}",
+                                 f"staff-document:{conversation.platform}:{update['update_id']}", document=document)
+    db.add(ProjectEvent(project_id=project.id, actor_type="admin", actor_id=str(staff.id),
+                        event_type="reply", note=document.original_name, private=False))
+    await _staff_menu(db, conversation, update, staff, notice="فایل در صف ارسال به مشتری قرار گرفت.")
 
 
 async def handle_update(db: AsyncSession, platform: str, update: dict[str, Any], adapter: BotAdapter) -> None:
@@ -778,12 +871,24 @@ async def handle_update(db: AsyncSession, platform: str, update: dict[str, Any],
         if data.startswith("c:project:") and not staff:
             await _project_view(db, conversation, update, data.removeprefix("c:project:"), identity.customer_id)
             return
+        if staff and data in {"a:projects", "a:queue"}:
+            conversation.state = "home"
+            conversation.draft_data = {}
         if staff and data == "a:projects":
             await _project_list(db, conversation, update, identity.customer_id or "", staff=staff)
             return
         if staff and data == "a:queue" and has_permission(staff.role, "projects.read"):
             await _project_list(db, conversation, update, identity.customer_id or "", staff=staff, all_projects=True)
             return
+        if staff and data.startswith("a:file:") and has_permission(staff.role, "messages.reply"):
+            public_id = data.removeprefix("a:file:")
+            project = await db.scalar(_staff_project_scope(select(Project).where(Project.public_id == public_id), staff))
+            if project:
+                conversation.state = "staff_file"
+                conversation.draft_data = {"delivery_project": public_id}
+                await _queue_ui(db, conversation, f"فایل پروژهٔ {public_id} را بفرستید. توضیح فایل اختیاری است.",
+                                [[_button("لغو ارسال", "a:home")]], update)
+                return
         if staff and data.startswith("a:project:"):
             await _project_view(db, conversation, update, data.removeprefix("a:project:"), staff=staff)
             return
@@ -813,6 +918,9 @@ async def handle_update(db: AsyncSession, platform: str, update: dict[str, Any],
         await _show_home(db, conversation, update, staff=bool(staff),
                          can_view_all=bool(staff and has_permission(staff.role, "projects.read")),
                          notice="فرایند جاری لغو شد.")
+        return
+    if staff and conversation.state == "staff_file" and "message" in update:
+        await _staff_send_file(db, adapter, staff, conversation, message, update)
         return
     if staff:
         await _queue_ui(db, conversation, "از دکمه‌های منوی همکاران برای مشاهدهٔ پروژه‌ها استفاده کنید.",
