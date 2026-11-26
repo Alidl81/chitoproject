@@ -10,12 +10,12 @@ Worker مسیرهای پرداخت و دانلود را به نصب ChitoProject
 | --- | --- |
 | Repository | `Alidl81/chitoproject` |
 | Production branch | `main` |
-| Worker name | `chitoproject-checkout` |
+| Worker name | `chitoproject` |
 | Root directory | `cloudflare/checkout` |
 | Build command | خالی |
 | Deploy command | `npx wrangler deploy` |
 
-پس از Deploy، نشانی `workers.dev` را از Domains & Routes کپی کنید. تا زمانی که مبدأ تنظیم نشده، `/orders` کد ۵۰۳ می‌دهد.
+آدرس فعلی در Domains & Routes برابر `https://chitoproject.chi2play-official.workers.dev` است. تا زمانی که مبدأ تنظیم نشده، `/orders` کد ۵۰۳ می‌دهد.
 
 ## مبدأ HTTPS
 

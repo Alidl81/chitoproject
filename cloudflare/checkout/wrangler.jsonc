@@ -1,8 +1,9 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "chitoproject-checkout",
+  "name": "chitoproject",
   "main": "worker.mjs",
   "compatibility_date": "2025-10-01",
   "workers_dev": true,
-  "preview_urls": false
+  "preview_urls": false,
+  "keep_vars": true
 }
