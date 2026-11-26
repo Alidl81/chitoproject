@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
+from datetime import timedelta
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, insert, or_, select
 from sqlalchemy import update as sql_update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.files import (
@@ -27,17 +30,21 @@ from app.models import (
     Attachment,
     AuditEvent,
     BotLinkChallenge,
+    Broadcast,
     Conversation,
     ConversationFile,
+    ConversationHidden,
     ConversationMessage,
     Customer,
     OutboxMessage,
     PlatformIdentity,
     Project,
     ProjectEvent,
+    new_id,
 )
 from app.permissions import Role, has_permission, role_label
 from app.security import (
+    constant_time_token_match,
     digest_token,
     expires_in,
     hash_password,
@@ -345,51 +352,209 @@ async def project_note(project_id: str, request: Request, db: AsyncSession = Dep
     return redirect(f"/admin/projects/{project.id}", "note-saved")
 
 
+def _conversation_identity():
+    return (
+        select(PlatformIdentity.id)
+        .where(
+            PlatformIdentity.customer_id == Conversation.customer_id,
+            PlatformIdentity.platform == Conversation.platform,
+            PlatformIdentity.chat_id == Conversation.chat_id,
+        )
+        .order_by(PlatformIdentity.last_seen_at.desc(), PlatformIdentity.id.desc())
+        .limit(1).correlate(Conversation).scalar_subquery()
+    )
+
+
 @router.get("/conversations")
 async def conversations_page(request: Request, db: AsyncSession = Depends(get_session),
-                             q: str = "", page: int = 1):
+                             q: str = "", page: int = 1, archived: bool = False):
     guard = await _guard(request, db, "customers.read")
     if not isinstance(guard, tuple):
         return guard
     admin, auth = guard
-    query_text = q.strip()[:80]
-    filters = [Conversation.customer_id.is_not(None)]
-    if query_text:
-        needle = f"%{query_text}%"
-        filters.append(or_(Customer.display_name.ilike(needle), Conversation.chat_id.ilike(needle)))
-    total = int(await db.scalar(
-        select(func.count()).select_from(Conversation).join(Customer, Customer.id == Conversation.customer_id)
-        .where(*filters)
-    ) or 0)
+    search = q.strip()[:80]
+    query = (
+        select(Conversation, Customer, PlatformIdentity)
+        .join(Customer, Customer.id == Conversation.customer_id)
+        .outerjoin(PlatformIdentity, PlatformIdentity.id == _conversation_identity())
+        .outerjoin(ConversationHidden, and_(
+            ConversationHidden.conversation_id == Conversation.id,
+            ConversationHidden.admin_id == admin.id,
+        ))
+    )
+    hidden = or_(
+        and_(Conversation.panel_hidden_at.is_not(None), Conversation.panel_hidden_at >= Conversation.updated_at),
+        and_(ConversationHidden.hidden_at.is_not(None), ConversationHidden.hidden_at >= Conversation.updated_at),
+    )
+    query = query.where(hidden if archived else ~hidden)
+    if search:
+        term = search.lstrip("@").replace("/", "//").replace("%", "/%").replace("_", "/_")
+        needle = f"%{term}%"
+        query = query.where(or_(*(column.ilike(needle, escape="/") for column in (
+            Customer.display_name, PlatformIdentity.username, PlatformIdentity.provider_user_id, Conversation.chat_id,
+        ))))
+    total = int(await db.scalar(select(func.count()).select_from(query.subquery())) or 0)
     page_count = max(1, (total + 29) // 30)
     page = min(max(page, 1), page_count)
-    last_message_id = (
-        select(ConversationMessage.id)
-        .where(ConversationMessage.conversation_id == Conversation.id)
-        .order_by(ConversationMessage.created_at.desc(), ConversationMessage.revision.desc())
-        .limit(1)
-        .correlate(Conversation)
-        .scalar_subquery()
+    items = (await db.execute(
+        query.order_by(func.lower(Customer.display_name), Customer.id, Conversation.platform, Conversation.id)
+        .offset((page - 1) * 30).limit(30)
+    )).all()
+    return _page(request, "conversations.html", admin, auth, items=items, total=total, page=page,
+                 page_count=page_count, search=search, archived=archived, is_owner=admin.role == Role.OWNER.value)
+
+
+@router.post("/conversations/{conversation_id}/hide")
+async def hide_conversation(conversation_id: str, request: Request, db: AsyncSession = Depends(get_session)):
+    guard = await _guard(request, db, "customers.read", post=True)
+    if not isinstance(guard, tuple):
+        return guard
+    admin, _ = guard
+    conversation = await db.get(Conversation, conversation_id, with_for_update=True)
+    if not conversation or not conversation.customer_id:
+        return redirect("/admin/conversations", "missing")
+    hidden = await db.get(ConversationHidden, (admin.id, conversation.id))
+    if hidden is None:
+        db.add(ConversationHidden(admin_id=admin.id, conversation_id=conversation.id, hidden_at=now_utc()))
+    else:
+        hidden.hidden_at = now_utc()
+    await db.commit()
+    return redirect("/admin/conversations", "conversation-hidden")
+
+
+@router.post("/conversations/{conversation_id}/remove-both")
+async def remove_conversation_both(conversation_id: str, request: Request, db: AsyncSession = Depends(get_session)):
+    guard = await _guard(request, db, "*", post=True)
+    if not isinstance(guard, tuple):
+        return guard
+    admin, _ = guard
+    conversation = await db.get(Conversation, conversation_id, with_for_update=True)
+    if not conversation or not conversation.customer_id or conversation.admin_id is not None:
+        return redirect("/admin/conversations", "missing")
+    now = now_utc()
+    eligible = select(ConversationMessage.provider_message_id).where(
+        ConversationMessage.conversation_id == conversation.id,
+        ConversationMessage.provider_message_id.is_not(None),
+        ConversationMessage.provider_message_id != "0",
+        ConversationMessage.direction.in_(("inbound", "outbound")),
+        ConversationMessage.deleted_from_chat.is_(False),
     )
-    project_counts = select(
-        Project.conversation_id.label("conversation_id"),
-        func.count(Project.id).label("project_count"),
-    ).group_by(Project.conversation_id).subquery()
-    query = (
-        select(Conversation, ConversationMessage, func.coalesce(project_counts.c.project_count, 0))
-        .join(Customer, Customer.id == Conversation.customer_id)
-        .outerjoin(ConversationMessage, ConversationMessage.id == last_message_id)
-        .outerjoin(project_counts, project_counts.c.conversation_id == Conversation.id)
-        .where(*filters)
-        .order_by(Conversation.updated_at.desc())
-        .offset((page - 1) * 30)
-        .limit(30)
+    if conversation.platform == "telegram":
+        # An edited message's archive timestamp can be newer than the original.
+        eligible = eligible.where(ConversationMessage.created_at >= now - timedelta(hours=48),
+                                  ConversationMessage.revision == 1)
+    eligible = eligible.distinct()
+    existing = select(OutboxMessage.provider_message_id).where(
+        OutboxMessage.conversation_id == conversation.id, OutboxMessage.operation == "delete",
+        OutboxMessage.status.in_(("pending", "processing", "sent")), OutboxMessage.provider_message_id.is_not(None),
     )
-    rows = (await db.execute(query)).all()
-    items = [{"conversation": conversation, "last": last, "project_count": int(project_count)}
-             for conversation, last, project_count in rows]
-    return _page(request, "conversations.html", admin, auth, items=items,
-                 total=total, page=page, page_count=page_count, search=query_text)
+    ids = list(await db.scalars(eligible.where(ConversationMessage.provider_message_id.not_in(existing))))
+    streak = random_token(12)
+    for index, provider_id in enumerate(ids):
+        db.add(OutboxMessage(
+            dedupe_key=f"panel-delete:{streak}:{index}", platform=conversation.platform, chat_id=conversation.chat_id,
+            conversation_id=conversation.id, operation="delete", provider_message_id=provider_id, body="",
+        ))
+    # Assign both timestamps explicitly so onupdate cannot make the conversation visible again.
+    conversation.updated_at = now
+    conversation.panel_hidden_at = now
+    _audit(db, admin, "conversation.remove_both", "conversation", conversation.id, {"queued": len(ids)})
+    await db.commit()
+    return redirect("/admin/conversations", "conversation-delete-queued" if ids else "conversation-no-deletable")
+
+
+def _broadcast_channels() -> dict[str, str]:
+    channels = {}
+    if settings.telegram_bot_token:
+        channels["telegram"] = "تلگرام"
+    if settings.bale_bot_token:
+        channels["bale"] = "بله"
+    return channels
+
+
+def _broadcast_recipients(platforms: list[str]):
+    # Keep customer conversations only, including those hidden from a colleague's list.
+    linked_staff = select(PlatformIdentity.id).where(
+        PlatformIdentity.platform == Conversation.platform,
+        PlatformIdentity.chat_id == Conversation.chat_id,
+        PlatformIdentity.admin_id.is_not(None),
+    ).exists()
+    return select(Conversation.id, Conversation.platform, Conversation.chat_id).where(
+        Conversation.platform.in_(platforms), Conversation.customer_id.is_not(None),
+        Conversation.admin_id.is_(None), ~linked_staff,
+    )
+
+
+@router.get("/broadcasts")
+async def broadcasts_page(request: Request, db: AsyncSession = Depends(get_session), batch: str = ""):
+    guard = await _guard(request, db, "*")
+    if not isinstance(guard, tuple):
+        return guard
+    admin, auth = guard
+    history = list(await db.scalars(select(Broadcast).order_by(Broadcast.created_at.desc()).limit(10)))
+    active = await db.get(Broadcast, batch) if re.fullmatch(r"[a-f0-9-]{36}", batch) else None
+    counts = {}
+    if active:
+        counts = dict((await db.execute(select(OutboxMessage.status, func.count()).where(
+            OutboxMessage.dedupe_key.startswith(f"broadcast:{active.id}:")
+        ).group_by(OutboxMessage.status))).all())
+    return _page(request, "broadcasts.html", admin, auth, channels=_broadcast_channels(),
+                 history=history, active=active, counts=counts)
+
+
+@router.post("/broadcasts")
+async def broadcast_submit(request: Request, db: AsyncSession = Depends(get_session),
+                           body: str = Form(""), audience: str = Form("all"),
+                           batch: str = Form(""), confirmation: str = Form("")):
+    guard = await _guard(request, db, "*", post=True)
+    if not isinstance(guard, tuple):
+        return guard
+    admin, auth = guard
+    channels = _broadcast_channels()
+    selected = list(channels) if audience == "all" else [audience] if audience in channels else []
+    body = body.strip()
+    if not selected or not 0 < len(body) <= 4000:
+        return redirect("/admin/broadcasts", "broadcast-invalid")
+    recipients = _broadcast_recipients(selected)
+    if batch and not re.fullmatch(r"[a-f0-9-]{36}", batch):
+        return redirect("/admin/broadcasts", "broadcast-invalid")
+    if batch and await db.get(Broadcast, batch):
+        return redirect(f"/admin/broadcasts?batch={batch}")
+    rows = (await db.execute(recipients.order_by(Conversation.id))).all()
+    if not rows:
+        return redirect("/admin/broadcasts", "broadcast-empty")
+    preview_id = batch or new_id()
+    snapshot = json.dumps(["broadcast-preview", auth.csrf_token, preview_id, audience, body,
+                           [tuple(row) for row in rows]], ensure_ascii=False)
+    if not batch:
+        return _page(request, "broadcasts.html", admin, auth, preview=body, audience=audience,
+                     count=len(rows), batch=preview_id, confirmation=digest_token(snapshot), channels=channels)
+    if not constant_time_token_match(snapshot, confirmation):
+        return redirect("/admin/broadcasts", "broadcast-audience-changed")
+    now = now_utc()
+    db.add(Broadcast(id=batch, admin_id=admin.id, body=body, audience=audience, recipient_count=len(rows)))
+    try:
+        await db.flush()
+    except IntegrityError:
+        await db.rollback()
+        if await db.get(Broadcast, batch):
+            return redirect(f"/admin/broadcasts?batch={batch}")
+        raise
+    for start in range(0, len(rows), 250):
+        messages, jobs = [], []
+        for index, (conversation_id, platform, chat_id) in enumerate(rows[start:start + 250], start):
+            message_id = new_id()
+            messages.append(dict(id=message_id, conversation_id=conversation_id, direction="outbound",
+                                 actor_label=admin.display_name or admin.username, content=body,
+                                 metadata_json={"delivery_status": "queued", "broadcast_id": batch}))
+            jobs.append(dict(dedupe_key=f"broadcast:{batch}:{conversation_id}", platform=platform,
+                             chat_id=chat_id, conversation_id=conversation_id, transcript_message_id=message_id,
+                             operation="send", body=body, next_attempt_at=now + timedelta(seconds=index // 10)))
+        await db.execute(insert(ConversationMessage), messages)
+        await db.execute(insert(OutboxMessage), jobs)
+    _audit(db, admin, "broadcast.queued", "broadcast", batch, {"audience": audience, "recipients": len(rows)})
+    await db.commit()
+    return redirect(f"/admin/broadcasts?batch={batch}")
 
 
 @router.get("/conversations/{conversation_id}")
@@ -415,8 +580,20 @@ async def conversation_detail(conversation_id: str, request: Request, db: AsyncS
     messages.reverse()
     files = list((await db.scalars(select(ConversationFile).where(
         ConversationFile.conversation_id == conversation.id).order_by(ConversationFile.created_at))).all())
+    customer = await db.get(Customer, conversation.customer_id)
+    identity = await db.scalar(select(PlatformIdentity).where(
+        PlatformIdentity.customer_id == conversation.customer_id,
+        PlatformIdentity.platform == conversation.platform,
+        PlatformIdentity.chat_id == conversation.chat_id,
+    ).order_by(PlatformIdentity.last_seen_at.desc(), PlatformIdentity.id.desc()).limit(1))
+    remote_removal = dict((await db.execute(
+        select(OutboxMessage.status, func.count()).where(
+            OutboxMessage.conversation_id == conversation.id, OutboxMessage.dedupe_key.startswith("panel-delete:"),
+        ).group_by(OutboxMessage.status)
+    )).all())
     return _page(request, "conversation_detail.html", admin, auth,
-                 conversation=conversation, project=project, messages=messages, files=files,
+                 conversation=conversation, customer=customer, identity=identity, remote_removal=remote_removal,
+                 project=project, messages=messages, files=files,
                  page=page, page_count=page_count, total_messages=total_messages,
                  can_delete=admin.role == Role.OWNER.value,
                  can_reply=has_permission(admin.role, "messages.reply"))

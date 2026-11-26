@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import timedelta
 from pathlib import Path
 
@@ -454,10 +455,13 @@ async def test_ui_queue_edits_latest_control_message(db_context, monkeypatch) ->
 
 
 @pytest.mark.asyncio
-async def test_admin_conversation_page_renders_and_csrf_is_enforced(db_context) -> None:
+async def test_admin_conversation_page_renders_and_csrf_is_enforced(db_context, monkeypatch) -> None:
+    from pydantic import SecretStr
+
     from app.database import get_session
     from app.main import app
 
+    monkeypatch.setattr(settings, "telegram_bot_token", SecretStr("test-token"))
     session, maker = db_context
     admin = AdminUser(username="owner-test", password_hash="not-used-in-this-test",
                       role=Role.OWNER.value, display_name="مدیر")
@@ -476,8 +480,9 @@ async def test_admin_conversation_page_renders_and_csrf_is_enforced(db_context) 
     session.add(conversation)
     await session.flush()
     transcript_message = ConversationMessage(conversation_id=conversation.id, direction="inbound",
-                                             actor_label="مینا", content="سلام")
-    session.add(transcript_message)
+                                             actor_label="مینا", provider_message_id="12", content="سلام")
+    session.add_all([transcript_message, PlatformIdentity(platform="telegram", provider_user_id="88",
+                                                          chat_id="88", username="minatest", customer_id=customer.id)])
     await session.flush()
     stored_key = "a" * 32
     (settings.uploads_dir / stored_key).write_bytes(b"private-file")
@@ -500,7 +505,13 @@ async def test_admin_conversation_page_renders_and_csrf_is_enforced(db_context) 
             response = await client.get("/admin/conversations")
             assert response.status_code == 200
             assert "گفتگوهای مشتریان" in response.text
-            assert "سلام" in response.text
+            assert "مینا" in response.text and "@minatest" in response.text
+            assert "سلام" not in response.text
+            assert f"/admin/conversations/{conversation.id}" in (
+                await client.get("/admin/conversations", params={"q": "@minatest"})
+            ).text
+            detail = await client.get(f"/admin/conversations/{conversation.id}")
+            assert detail.status_code == 200 and "سلام" in detail.text and "@minatest" in detail.text
             assert response.headers["x-frame-options"] == "DENY"
 
             rejected = await client.post("/admin/team/invites", data={"role": "reviewer"})
@@ -523,6 +534,37 @@ async def test_admin_conversation_page_renders_and_csrf_is_enforced(db_context) 
                     ConversationFile.message_id == job.transcript_message_id,
                 ))
                 assert job.chat_id == "88" and archived_file.original_name == "delivery.pdf"
+
+            csrf_form = {"csrf_token": session_csrf}
+            hidden = await client.post(f"/admin/conversations/{conversation.id}/hide", data=csrf_form)
+            assert hidden.status_code == 303
+            assert "@minatest" not in (await client.get("/admin/conversations")).text
+            assert "@minatest" in (await client.get("/admin/conversations?archived=1")).text
+            both = await client.post(f"/admin/conversations/{conversation.id}/remove-both", data=csrf_form)
+            assert "notice=conversation-delete-queued" in both.headers["location"]
+            async with maker() as verification:
+                remove_job = await verification.scalar(select(OutboxMessage).where(OutboxMessage.operation == "delete"))
+                assert remove_job.provider_message_id == "12"
+                assert await verification.get(ConversationMessage, transcript_message.id)
+
+            form = {**csrf_form, "body": "پیام نمونه", "audience": "telegram"}
+            preview = await client.post("/admin/broadcasts", data=form)
+            assert preview.status_code == 200 and "ارسال به 1 گفتگو" in preview.text
+            async with maker() as verification:
+                assert await verification.scalar(select(OutboxMessage).where(
+                    OutboxMessage.dedupe_key.startswith("broadcast:"))) is None
+            for field in ("batch", "confirmation"):
+                form[field] = re.search(rf'name="{field}" value="([^"]+)"', preview.text).group(1)
+            tampered = await client.post("/admin/broadcasts", data={**form, "body": "changed"})
+            assert "notice=broadcast-audience-changed" in tampered.headers["location"]
+            sent = await client.post("/admin/broadcasts", data=form)
+            duplicate = await client.post("/admin/broadcasts", data=form)
+            assert sent.headers["location"] == duplicate.headers["location"]
+            assert (await client.get(sent.headers["location"])).status_code == 200
+            async with maker() as verification:
+                jobs = list(await verification.scalars(select(OutboxMessage).where(
+                    OutboxMessage.dedupe_key.startswith("broadcast:"))))
+                assert len(jobs) == 1 and jobs[0].chat_id == "88"
 
             deleted = await client.post(
                 f"/admin/conversations/{conversation.id}/delete-transcript",

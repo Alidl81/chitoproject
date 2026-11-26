@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}پیام همگانی{% endblock %}
+{% block heading %}پیام همگانی{% endblock %}
+{% block content %}
+<a class="back-link" href="/admin/conversations">← بازگشت به گفتگوها</a>
+<section class="panel-card">
+  {% if preview %}
+    <h2>پیش‌نمایش ارسال به {{ count }} گفتگو</h2>
+    <p>{{ channels.get(audience, 'همهٔ پیام‌رسان‌های فعال') }}</p>
+    <div class="transcript"><article class="message-bubble"><p>{{ preview }}</p></article></div>
+    <form method="post" class="reply-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="audience" value="{{ audience }}">
+      <input type="hidden" name="batch" value="{{ batch }}">
+      <input type="hidden" name="confirmation" value="{{ confirmation }}">
+      <textarea name="body" hidden>{{ preview }}</textarea>
+      <button class="button primary">تأیید و ارسال همگانی</button>
+      <a class="button secondary" href="/admin/broadcasts">لغو</a>
+    </form>
+  {% elif channels %}
+    <h2>پیام جدید</h2>
+    <form method="post" class="reply-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label for="audience">گیرندگان</label>
+      <select id="audience" name="audience">
+        <option value="all">همهٔ پیام‌رسان‌های فعال</option>
+        {% for value, label in channels.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+      </select>
+      <label for="body">متن پیام</label>
+      <textarea id="body" name="body" rows="5" maxlength="4000" required></textarea>
+      <button class="button primary">پیش‌نمایش و شمار گیرندگان</button>
+    </form>
+  {% else %}<p class="muted">هیچ رباتی برای ارسال تنظیم نشده است.</p>{% endif %}
+</section>
+{% if active %}
+<section class="panel-card">
+  <h2>وضعیت ارسال</h2>
+  <p>{{ active.recipient_count }} گیرنده · {{ counts.get('sent', 0) }} ارسال‌شده · {{ counts.get('failed', 0) }} ناموفق · {{ counts.get('pending', 0) + counts.get('processing', 0) }} در صف · {{ counts.get('canceled', 0) }} لغوشده</p>
+  <a href="?batch={{ active.id }}">تازه‌سازی وضعیت</a>
+</section>
+{% endif %}
+{% if history %}
+<details class="panel-card"><summary>ارسال‌های اخیر</summary>
+  <ul>{% for entry in history %}<li><a href="?batch={{ entry.id }}">{{ entry.body[:75] }} · {{ entry.recipient_count }} گیرنده · {{ format_local(entry.created_at) }}</a></li>{% endfor %}</ul>
+</details>
+{% endif %}
+{% endblock %}

@@ -3,11 +3,29 @@
 {% block heading %}تاریخچهٔ گفتگو{% endblock %}
 {% block content %}
 <a class="back-link" href="/admin/conversations">← بازگشت به گفتگوها</a>
-<section class="panel-card"><div class="panel-heading"><div><p class="eyebrow">{{ 'Telegram' if conversation.platform == 'telegram' else 'Bale' }} · خصوصی</p><h2>گفتگوی مشتری</h2></div>{% if project and can_projects %}<a class="button small secondary" href="/admin/projects/{{ project.id }}">پروژه {{ project.public_id }}</a>{% endif %}</div>
+<section class="panel-card"><div class="panel-heading"><div><p class="eyebrow">{{ 'Telegram' if conversation.platform == 'telegram' else 'Bale' }} · خصوصی</p><h2>{{ customer.display_name or "کاربر بدون نام" }}</h2>{% if identity %}<p class="muted" dir="ltr">{% if identity.username %}@{{ identity.username }} · {% endif %}{{ identity.provider_user_id }}</p>{% endif %}</div>{% if project and can_projects %}<a class="button small secondary" href="/admin/projects/{{ project.id }}">پروژه {{ project.public_id }}</a>{% endif %}</div>
   <p class="muted">{{ total_messages }} پیام و نسخه در آرشیو · صفحهٔ {{ page }}</p>
   {% if total_messages > 500 %}<div class="pagination">{% if page > 1 %}<a class="button small secondary" href="?page={{ page - 1 }}">پیام‌های جدیدتر</a>{% endif %}{% if total_messages > page * 500 %}<a class="button small secondary" href="?page={{ page + 1 }}">پیام‌های قدیمی‌تر</a>{% endif %}</div>{% endif %}
   <div class="transcript transcript-large">{% for message in messages %}<article class="message-bubble {% if message.direction == 'outbound' %}outbound{% elif message.direction == 'event' %}system{% endif %}"><div class="message-meta"><b>{{ message.actor_label or ('مشتری' if message.direction == 'inbound' else 'تیم') }}</b><time>{{ format_local(message.created_at) }}</time>{% if message.revision > 1 %}<span>نسخهٔ {{ message.revision }}</span>{% endif %}{% if message.deleted_from_chat %}<span>از صفحهٔ مشتری پاک‌شده</span>{% endif %}</div><p>{{ message.content }}</p>{% if message.metadata_json.get('delivery_status') == 'failed' %}<small class="text-danger">ارسال ناموفق</small>{% endif %}{% for file in files if file.message_id == message.id %}<a class="attachment" href="/admin/conversation-files/{{ file.id }}"><span>▤</span><span><b>{{ file.original_name }}</b><small>{{ (file.size_bytes / 1024)|round|int }} KB · دریافت امن</small></span><span>↓</span></a>{% endfor %}</article>{% else %}<div class="empty-state"><b>آرشیو گفتگو خالی است</b><p>این گفتگو هنوز پیام بایگانی‌شده ندارد.</p></div>{% endfor %}</div>
   {% if can_reply %}<form method="post" enctype="multipart/form-data" action="/admin/conversations/{{ conversation.id }}/reply" class="reply-form"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><label for="reply">ارسال پیام به مشتری</label><textarea id="reply" name="body" rows="4" maxlength="4000" placeholder="پاسخ را بنویسید…"></textarea><label for="reply-file">پیوست فایل (اختیاری)</label><input id="reply-file" name="file" type="file"><small class="muted">می‌توانید فایل را بدون متن بفرستید. توضیح پیوست حداکثر ۱۰۲۴ نویسه است.</small><button class="button primary" type="submit">ارسال پاسخ</button></form>{% endif %}
 </section>
-{% if can_delete %}<section class="panel-card danger-zone"><div><p class="eyebrow">مدیریت داده</p><h3>حذف آرشیو این گفتگو</h3><p>این کار پیام‌های ذخیره‌شده را برای همیشه از پایگاه‌داده پاک می‌کند. رویداد حذف در گزارش مدیریتی باقی می‌ماند.</p></div><form method="post" action="/admin/conversations/{{ conversation.id }}/delete-transcript" data-confirm="آرشیو گفتگو به‌طور دائمی حذف شود؟"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button danger" type="submit">حذف آرشیو گفتگو</button></form></section>{% endif %}
+<details class="panel-card">
+  <summary>مدیریت گفتگو</summary>
+  <form method="post" action="/admin/conversations/{{ conversation.id }}/hide" class="reply-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button class="button secondary">بایگانی فقط برای من</button>
+  </form>
+  {% if can_delete %}
+  <form method="post" action="/admin/conversations/{{ conversation.id }}/remove-both" class="reply-form" data-confirm="گفتگو برای تیم بایگانی شود و درخواست حذف پیام‌ها از چت مشتری ثبت شود؟">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <small class="muted">آرشیو داخلی حفظ می‌شود. حذف هر پیام از چت مشتری به مجوز پیام‌رسان بستگی دارد.</small>
+    <button class="button danger">درخواست حذف دوطرفه</button>
+  </form>
+  {% if remote_removal %}<p class="muted">{{ remote_removal.get('sent', 0) }} حذف‌شده · {{ remote_removal.get('failed', 0) }} ناموفق · {{ remote_removal.get('pending', 0) + remote_removal.get('processing', 0) }} در صف</p>{% endif %}
+  <form method="post" action="/admin/conversations/{{ conversation.id }}/delete-transcript" class="reply-form" data-confirm="آرشیو داخلی گفتگو به‌طور دائمی پاک شود؟">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button class="button danger">پاک‌کردن دائمی آرشیو داخلی</button>
+  </form>
+  {% endif %}
+</details>
 {% endblock %}

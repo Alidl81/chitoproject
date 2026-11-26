@@ -2,8 +2,40 @@
 {% block title %}گفتگوها{% endblock %}
 {% block heading %}گفتگوهای مشتریان{% endblock %}
 {% block content %}
-<section class="panel-card"><div class="panel-heading"><div><p class="eyebrow">تاریخچهٔ ارتباط</p><h2>آخرین گفتگوها</h2><p class="muted">{{ total }} گفتگو · پیام‌های بایگانی‌شده حتی پس از پاک‌سازی صفحهٔ مشتری باقی می‌مانند.</p></div><span class="section-icon small">◌</span></div>
-<form method="get" action="/admin/conversations" class="filter-bar"><label class="search-field"><span>⌕</span><input name="q" value="{{ search }}" placeholder="جست‌وجو با نام مشتری یا شناسهٔ گفتگو"></label><button class="button secondary" type="submit">جست‌وجو</button></form>
-{% if items %}<div class="conversation-list">{% for item in items %}<a class="conversation-row" href="/admin/conversations/{{ item.conversation.id }}"><span class="conversation-avatar">{{ (item.conversation.platform[:1])|upper }}</span><span class="conversation-main"><b>{{ item.last.actor_label if item.last else 'گفتگو' }}</b><small>{{ item.last.content[:120] if item.last else 'بدون پیام ثبت‌شده' }}</small></span><span class="conversation-meta"><b>{{ 'Telegram' if item.conversation.platform == 'telegram' else 'Bale' }}</b><small>{{ item.project_count }} پروژه</small></span><span class="row-chevron">←</span></a>{% endfor %}</div>{% else %}<div class="empty-state"><span>◌</span><b>گفتگویی ثبت نشده</b><p>با شروع مکاتبه از سمت مشتری، تاریخچه در اینجا ذخیره می‌شود.</p></div>{% endif %}</section>
-{% if page_count > 1 %}<div class="pagination"><span>صفحهٔ {{ page }} از {{ page_count }}</span>{% if page > 1 %}<a class="button small secondary" href="?page={{ page - 1 }}&q={{ search }}">جدیدتر</a>{% endif %}{% if page < page_count %}<a class="button small secondary" href="?page={{ page + 1 }}&q={{ search }}">قدیمی‌تر</a>{% endif %}</div>{% endif %}
+<section class="panel-card">
+  <div class="panel-heading">
+    <div><h2>{{ 'بایگانی گفتگوها' if archived else 'گفتگوها بر اساس نام مشتری' }}</h2><p class="muted">{{ total }} گفتگو</p></div>
+    <div>
+      <a class="button small secondary" href="/admin/conversations{{ '' if archived else '?archived=1' }}">{{ 'گفتگوهای فعال' if archived else 'بایگانی' }}</a>
+      {% if is_owner %}<a class="button small secondary" href="/admin/broadcasts">پیام همگانی</a>{% endif %}
+    </div>
+  </div>
+  <form method="get" action="/admin/conversations" class="filter-bar">
+    {% if archived %}<input type="hidden" name="archived" value="1">{% endif %}
+    <label class="search-field"><span>⌕</span><input name="q" value="{{ search }}" aria-label="نام، نام کاربری یا شناسه" placeholder="جست‌وجوی نام، نام کاربری یا شناسه"></label>
+    <button class="button secondary" type="submit">جست‌وجو</button>
+  </form>
+  {% if items %}
+  <div class="conversation-list">
+    {% for conversation, customer, identity in items %}
+    <a class="conversation-row" href="/admin/conversations/{{ conversation.id }}">
+      <span class="conversation-avatar" aria-hidden="true">{{ (customer.display_name or '؟')[0] }}</span>
+      <span class="conversation-main"><b>{{ customer.display_name or 'کاربر بدون نام' }}</b>
+        {% if identity and identity.username %}<small dir="ltr">@{{ identity.username }}</small>{% endif %}
+      </span>
+      <span class="conversation-meta">
+        <b>{{ 'تلگرام' if conversation.platform == 'telegram' else 'بله' }}</b>
+        {% if identity %}<small dir="ltr">{{ identity.provider_user_id }}</small>{% endif %}
+      </span>
+      <span class="row-chevron" aria-hidden="true">←</span>
+    </a>
+    {% endfor %}
+  </div>
+  {% else %}<div class="empty-state"><b>گفتگویی پیدا نشد</b></div>{% endif %}
+</section>
+{% if page_count > 1 %}<div class="pagination">
+  <span>صفحهٔ {{ page }} از {{ page_count }}</span>
+  {% if page > 1 %}<a class="button small secondary" href="?page={{ page - 1 }}&q={{ search|urlencode }}{% if archived %}&archived=1{% endif %}">قبلی</a>{% endif %}
+  {% if page < page_count %}<a class="button small secondary" href="?page={{ page + 1 }}&q={{ search|urlencode }}{% if archived %}&archived=1{% endif %}">بعدی</a>{% endif %}
+</div>{% endif %}
 {% endblock %}

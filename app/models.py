@@ -84,9 +84,29 @@ class Conversation(Base):
     state: Mapped[str] = mapped_column(String(40), default="home")
     draft_data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     ui_message_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    panel_hidden_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     cleared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
+
+
+class ConversationHidden(Base):
+    __tablename__ = "conversation_hidden"
+
+    admin_id: Mapped[int] = mapped_column(ForeignKey("admin_users.id", ondelete="CASCADE"), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), primary_key=True)
+    hidden_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class Broadcast(Base):
+    __tablename__ = "broadcasts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id", ondelete="SET NULL"), nullable=True)
+    body: Mapped[str] = mapped_column(Text)
+    audience: Mapped[str] = mapped_column(String(16))
+    recipient_count: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
 
 class ConversationMessage(Base):
