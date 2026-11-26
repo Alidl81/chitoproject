@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-umask 022
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Run this installer as root: sudo bash scripts/install-vps.sh <git-repo-url> <host>" >&2
@@ -34,14 +33,57 @@ if [[ "$HOST_KIND" == "domain" ]]; then
     exit 2
   fi
 fi
+HTTPS_PORT="${CHITOPROJECT_HTTPS_PORT:-443}"
+if [[ ! "$HTTPS_PORT" =~ ^[0-9]{1,5}$ ]] || ((HTTPS_PORT < 1 || HTTPS_PORT > 65535 || HTTPS_PORT == 80)); then
+  echo "CHITOPROJECT_HTTPS_PORT must be an available TCP port from 1 to 65535 other than 80." >&2
+  exit 2
+fi
+if command -v ss >/dev/null 2>&1; then
+  if ss -H -ltn "sport = :80" | grep -q .; then
+    echo "TCP port 80 is already bound; the public HTTP-01 certificate challenge requires it. Refusing installation." >&2
+    exit 2
+  fi
+  if [[ -z "${CHITOPROJECT_HTTPS_PORT+x}" ]] && ss -H -ltn "sport = :443" | grep -q .; then
+    if ss -H -ltn "sport = :9443" | grep -q .; then
+      echo "Ports 443 and 9443 are already bound. Set CHITOPROJECT_HTTPS_PORT to a free public HTTPS port and rerun." >&2
+      exit 2
+    fi
+    HTTPS_PORT=9443
+    echo "TCP port 443 is occupied; using 9443 for ChitoProject HTTPS. Allow inbound TCP 9443 in the VPS firewall."
+  elif ss -H -ltn "sport = :$HTTPS_PORT" | grep -q .; then
+    echo "TCP port $HTTPS_PORT is already bound; choose a free CHITOPROJECT_HTTPS_PORT." >&2
+    exit 2
+  fi
+else
+  echo "The ss command is required to verify local HTTP/HTTPS port availability." >&2
+  exit 2
+fi
+PUBLIC_PORT_SUFFIX=""
+[[ "$HTTPS_PORT" == 443 ]] || PUBLIC_PORT_SUFFIX=":$HTTPS_PORT"
+PUBLIC_BASE_URL="https://${PUBLIC_HOST}${PUBLIC_PORT_SUFFIX}"
+TLSALPN_SETTING=""
+[[ "$HTTPS_PORT" == 443 ]] || TLSALPN_SETTING="disable_tlsalpn_challenge"
+DOMAIN_TLS_DIRECTIVE=""
+if [[ "$HTTPS_PORT" != 443 ]]; then
+  DOMAIN_TLS_DIRECTIVE=$'    tls {\n        issuer acme {\n            disable_tlsalpn_challenge\n        }\n    }\n'
+fi
 if ! command -v apt-get >/dev/null 2>&1; then
-  echo "This installer targets Ubuntu 24.04 LTS." >&2
+  echo "This installer targets Ubuntu 24.04 or 26.04 LTS." >&2
+  exit 2
+fi
+if [[ ! -r /etc/os-release ]]; then
+  echo "Cannot identify the operating system; refusing installation." >&2
+  exit 2
+fi
+source /etc/os-release
+if [[ "${ID:-}" != ubuntu || ! "${VERSION_ID:-}" =~ ^(24\.04|26\.04)$ ]]; then
+  echo "This installer targets Ubuntu 24.04 or 26.04 LTS; found ${PRETTY_NAME:-unknown}." >&2
   exit 2
 fi
 
 # This is a fresh-install path. Refuse existing application data or proxy config
 # before package installation or any configuration changes.
-for path in /opt/chitoproject/app /opt/chitoproject/venv /etc/chitoproject /var/lib/chitoproject /etc/caddy /etc/apt/sources.list.d/caddy-stable.list /usr/share/keyrings/caddy-stable-archive-keyring.gpg; do
+for path in /opt/chitoproject/app /opt/chitoproject-repo /opt/chitoproject/venv /etc/chitoproject /var/lib/chitoproject /etc/caddy /etc/apt/sources.list.d/caddy-stable.list /usr/share/keyrings/caddy-stable-archive-keyring.gpg; do
   if [[ -e "$path" || -L "$path" ]]; then
     echo "Existing path: $path. Refusing to overwrite; inspect it and use a reviewed migration." >&2
     exit 2
@@ -61,6 +103,35 @@ if ! id chitoproject >/dev/null 2>&1 || [[ "$(getent passwd chitoproject | cut -
   echo "Create the chitoproject service account and its read-only deploy key first; see docs/DEPLOYMENT_FA.md." >&2
   exit 2
 fi
+UV_BIN="${UV_BIN:-}"
+if [[ -n "$UV_BIN" ]]; then
+  if [[ ! -x "$UV_BIN" ]] || ! runuser -u chitoproject -- test -x "$UV_BIN"; then
+    echo "UV_BIN must be executable by the chitoproject service user." >&2
+    exit 2
+  fi
+else
+  for candidate in "$(command -v uv 2>/dev/null || true)" /usr/local/bin/uv /usr/bin/uv /opt/chitoproject-python/bin/uv; do
+    if [[ -n "$candidate" && -x "$candidate" ]] && runuser -u chitoproject -- test -x "$candidate"; then
+      UV_BIN="$candidate"
+      break
+    fi
+  done
+fi
+if [[ -z "$UV_BIN" ]]; then
+  echo "Install uv at a path executable by chitoproject, then rerun. Python/system packages were not changed." >&2
+  exit 2
+fi
+UV_PYTHON_INSTALL_DIR=/opt/chitoproject-python
+if ! PYTHON_312="$(runuser -u chitoproject -- env UV_PYTHON_INSTALL_DIR="$UV_PYTHON_INSTALL_DIR" \
+    "$UV_BIN" python find 3.12.16 2>/dev/null)"; then
+  echo "uv-managed Python 3.12.16 was not found in $UV_PYTHON_INSTALL_DIR; refusing installation." >&2
+  exit 2
+fi
+if ! runuser -u chitoproject -- "$PYTHON_312" -c 'import sys; assert sys.version_info[:3] == (3, 12, 16)' 2>/dev/null || \
+   [[ "$PYTHON_312" != "$UV_PYTHON_INSTALL_DIR"/* ]]; then
+  echo "uv did not resolve Python 3.12.16 from $UV_PYTHON_INSTALL_DIR; refusing installation." >&2
+  exit 2
+fi
 if [[ "$REPO_URL" != git@github.com:Alidl81/chitoproject.git ]]; then
   echo "Use the SSH URL git@github.com:Alidl81/chitoproject.git and a read-only deploy key." >&2
   exit 2
@@ -71,7 +142,8 @@ if ! runuser -u chitoproject -- test -r /opt/chitoproject/.ssh/id_ed25519 || \
   exit 2
 fi
 export GIT_SSH_COMMAND='ssh -i /opt/chitoproject/.ssh/id_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/opt/chitoproject/.ssh/known_hosts'
-if ! runuser -u chitoproject -- git ls-remote --exit-code "$REPO_URL" refs/heads/main >/dev/null; then
+if ! runuser -u chitoproject -- env GIT_SSH_COMMAND="$GIT_SSH_COMMAND" \
+    git ls-remote --exit-code "$REPO_URL" refs/heads/main >/dev/null; then
   echo "The service account cannot read main using its deploy key. No installation was performed." >&2
   exit 2
 fi
@@ -80,7 +152,7 @@ apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
   git openssh-client ca-certificates curl gnupg age openssl \
   debian-keyring debian-archive-keyring apt-transport-https \
-  python3.12 python3.12-venv postgresql postgresql-contrib
+  postgresql postgresql-contrib
 
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
   | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
@@ -106,15 +178,21 @@ install -d -o chitoproject -g chitoproject -m 0700 /var/lib/chitoproject/uploads
 install -d -o root -g chitoproject -m 0750 /etc/chitoproject
 
 APP_DIR=/opt/chitoproject/app
+REPO_DIR=/opt/chitoproject-repo
 VENV_DIR=/opt/chitoproject/venv
 if [[ -e "$APP_DIR" ]]; then
   echo "$APP_DIR already exists. Use scripts/deploy.sh for updates." >&2
   exit 2
 fi
-runuser -u chitoproject -- git clone --branch main --single-branch "$REPO_URL" "$APP_DIR"
-runuser -u chitoproject -- python3.12 -m venv "$VENV_DIR"
-runuser -u chitoproject -- "$VENV_DIR/bin/python" -m pip install --upgrade pip
-runuser -u chitoproject -- "$VENV_DIR/bin/python" -m pip install -e "$APP_DIR"
+install -d -o chitoproject -g chitoproject -m 0750 "$REPO_DIR"
+runuser -u chitoproject -- env GIT_SSH_COMMAND="$GIT_SSH_COMMAND" \
+  git clone --branch main --single-branch "$REPO_URL" "$REPO_DIR"
+install -d -o root -g root -m 0755 "$APP_DIR"
+runuser -u chitoproject -- git -C "$REPO_DIR" archive main | tar -x -C "$APP_DIR"
+chown -R chitoproject:chitoproject "$APP_DIR"
+runuser -u chitoproject -- env UV_PYTHON_INSTALL_DIR="$UV_PYTHON_INSTALL_DIR" \
+  "$UV_BIN" venv --python "$PYTHON_312" "$VENV_DIR"
+runuser -u chitoproject -- "$UV_BIN" pip install --python "$VENV_DIR/bin/python" -e "$APP_DIR"
 
 systemctl enable --now postgresql
 if runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='chitoproject'" | grep -q 1 || \
@@ -129,11 +207,10 @@ CREATE ROLE chitoproject LOGIN PASSWORD :'chitoproject_password';
 CREATE DATABASE chitoproject OWNER chitoproject;
 SQL
 
-umask 077
 cat > /etc/chitoproject/chitoproject.env <<EOF
 APP_ENV=production
 APP_NAME=ChitoProject
-PUBLIC_BASE_URL=https://${PUBLIC_HOST}
+PUBLIC_BASE_URL=${PUBLIC_BASE_URL}
 DATABASE_URL=postgresql+asyncpg://chitoproject:${DB_PASSWORD}@127.0.0.1:5432/chitoproject
 SECRET_KEY=${APP_SECRET}
 TELEGRAM_BOT_TOKEN=
@@ -152,7 +229,6 @@ BOT_WORKER_CONCURRENCY=8
 EOF
 chown root:chitoproject /etc/chitoproject/chitoproject.env
 chmod 0640 /etc/chitoproject/chitoproject.env
-umask 022
 ln -s /etc/chitoproject/chitoproject.env "$APP_DIR/.env"
 
 install -o root -g root -m 0644 "$APP_DIR/deploy/systemd/chitoproject-api.service" /etc/systemd/system/chitoproject-api.service
@@ -161,12 +237,26 @@ install -o root -g root -m 0644 "$APP_DIR/deploy/systemd/chitoproject-telegram.s
 install -o root -g root -m 0644 "$APP_DIR/deploy/systemd/chitoproject-bale.service" /etc/systemd/system/chitoproject-bale.service
 
 install -d -o root -g root -m 0755 /etc/caddy/conf.d
+cat > /etc/caddy/Caddyfile <<EOF
+{
+    http_port 80
+    https_port ${HTTPS_PORT}
+}
+
+import /etc/caddy/conf.d/*.caddy
+EOF
+SITE_ADDRESS="https://${PUBLIC_HOST}:${HTTPS_PORT}"
 if [[ "$HOST_KIND" == "ipv4" ]]; then
   cat > /etc/caddy/conf.d/chitoproject.caddy <<EOF
-${PUBLIC_HOST} {
+http://${PUBLIC_HOST} {
+    redir ${PUBLIC_BASE_URL}{uri} permanent
+}
+
+${SITE_ADDRESS} {
     tls {
         issuer acme https://acme-v02.api.letsencrypt.org/directory {
             profile shortlived
+            ${TLSALPN_SETTING}
         }
     }
     encode zstd gzip
@@ -175,14 +265,15 @@ ${PUBLIC_HOST} {
 EOF
 else
   cat > /etc/caddy/conf.d/chitoproject.caddy <<EOF
-${PUBLIC_HOST} {
-    encode zstd gzip
+http://${PUBLIC_HOST} {
+    redir ${PUBLIC_BASE_URL}{uri} permanent
+}
+
+${SITE_ADDRESS} {
+${DOMAIN_TLS_DIRECTIVE}    encode zstd gzip
     reverse_proxy 127.0.0.1:8000
 }
 EOF
-fi
-if ! grep -Fq 'import /etc/caddy/conf.d/*.caddy' /etc/caddy/Caddyfile; then
-  printf '\nimport /etc/caddy/conf.d/*.caddy\n' >> /etc/caddy/Caddyfile
 fi
 
 caddy validate --config /etc/caddy/Caddyfile
@@ -205,9 +296,9 @@ done
 
 cat <<EOF
 
-ChitoProject is installed at ${PUBLIC_HOST}.
+ChitoProject is installed at ${PUBLIC_BASE_URL}.
 The first owner code was printed above and expires after 24 hours. Use it once at:
-  https://${PUBLIC_HOST}/admin/activate
+  ${PUBLIC_BASE_URL}/admin/activate
 
 Bot tokens and usernames are currently blank. Edit /etc/chitoproject/chitoproject.env,
 then run: sudo systemctl restart chitoproject-api chitoproject-worker chitoproject-telegram chitoproject-bale

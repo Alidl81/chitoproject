@@ -1,60 +1,107 @@
-# استقرار روی VPS
+# استقرار ChitoProject
 
-## نصب تازه روی Ubuntu 24.04
+## به‌روزرسانی نصب موجود روی VPS
 
-این دستورها برای نصب تازه هستند. نصب‌کننده در صورت وجود مسیرهای برنامه، داده، تنظیمات، سرویس یا نصب Caddy متوقف می‌شود؛ مسیرهای موجود را حذف نکنید. در صورت وجود نقش یا پایگاه‌دادهٔ PostgreSQL با نام chitoproject نیز نصب متوقف می‌شود؛ چون این بررسی پس از نصب بسته‌ها انجام می‌شود، ممکن است پیش از توقف بخشی از نصب اولیه انجام شده باشد. پیش از نصب، نسخهٔ پشتیبان و شرایط سرور را بررسی کنید. اگر نصب نیمه‌کاره شد، آن را پاک نکنید؛ ابتدا علت و داده‌های موجود را بررسی کنید.
+سرور این نصب Ubuntu 26.04.1 است. مخزن GitHub در `/opt/chitoproject-repo`، برنامه در `/opt/chitoproject/app`، پایتون محیط مجازی با uv در `/opt/chitoproject-python` و فایل تنظیمات در `/etc/chitoproject/chitoproject.env` قرار دارند. دیتابیس و بارگذاری‌ها زیر `/var/lib/chitoproject` هستند. در VPS فعلی، پورت 443 متعلق به Xray است و Caddy روی 9443 سرویس می‌دهد؛ نشانی پنل `https://46.249.107.214:9443/admin` است.
 
-برای مخزن خصوصی باید **کلید اختصاصی فقط‌خواندنی متعلق به کاربر سرویس** ساخته شود. بخش‌های زیر را روی VPS اجرا کنید. اگر کاربر یا فایل‌های SSH از قبل موجودند، قبل از تغییر آنها را بررسی کنید.
+برای این نصب موجود، `install-vps.sh` را اجرا نکنید. آن اسکریپت فقط برای نصب تازه است و عمداً در حضور مسیرها، سرویس‌ها، Caddy، کلیدها یا دادهٔ موجود متوقف می‌شود.
+
+دستور زیر، بدون اجرای نصب‌کننده، نسخهٔ `deploy.sh` را از شاخهٔ `main` با کلید Deploy موجود در `/opt/chitoproject/.ssh/id_ed25519` می‌گیرد و اجرا می‌کند. Deploy هم‌زمان اصل remote و شاخه را بررسی می‌کند، در صورت وجود فایل‌های محلی غیرمنتظره در checkout یا برنامه متوقف می‌شود و فقط fast-forward امن می‌پذیرد. محیط Python باید همان uv-managed Python 3.12.16 باشد.
 
 ```bash
-sudo useradd --system --home-dir /opt/chitoproject --create-home --shell /usr/sbin/nologin chitoproject
-sudo install -d -m 700 -o chitoproject -g chitoproject /opt/chitoproject/.ssh
-sudo -u chitoproject ssh-keygen -t ed25519 -N '' -f /opt/chitoproject/.ssh/id_ed25519 -C chitoproject-vps-read-only
-sudo cat /opt/chitoproject/.ssh/id_ed25519.pub
+sudo bash -c 'set -euo pipefail; r=/opt/chitoproject-repo; g=(git -c safe.directory="$r" -C "$r"); export GIT_SSH_COMMAND="ssh -i /opt/chitoproject/.ssh/id_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/opt/chitoproject/.ssh/known_hosts"; "${g[@]}" fetch --no-tags git@github.com:Alidl81/chitoproject.git refs/heads/main; sha=$("${g[@]}" rev-parse FETCH_HEAD); "${g[@]}" merge-base --is-ancestor HEAD "$sha"; f=$(mktemp); trap "rm -f -- \"$f\"" EXIT; "${g[@]}" show "$sha:scripts/deploy.sh" > "$f"; bash "$f" "$sha"'
 ```
 
-فقط خروجی **کلید عمومی** را در GitHub، بخش Settings → Deploy keys → Add deploy key همان مخزن ثبت کنید و گزینهٔ write access را فعال نکنید. کلید خصوصی را هرگز ارسال نکنید. کلید عمومی میزبان GitHub را مطابق [مستندات رسمی](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints) بررسی و ذخیره کنید:
+Deploy اسکریپت نصب تازه را اجرا نمی‌کند، پایگاه‌داده یا سرویس systemd را از نو نمی‌سازد، فایل تنظیمات را دست نمی‌زند و پوشهٔ داده و آپلود را جابه‌جا نمی‌کند. migration پیش از restart اجرا می‌شود. API، worker و ربات‌های موجود و فعال/enableشده به‌ترتیب restart می‌شوند. نسخهٔ کد قبلی در `/opt/chitoproject/.app-rollback-*` نگه داشته می‌شود. در صورت شکست، اسکریپت کد قبلی را برمی‌گرداند؛ migration افزایشیِ اعمال‌شده را downgrade نمی‌کند.
+
+## بررسی گواهی و بازنشدن `/admin`
+
+آدرس `/admin` در برنامه باید بدون نشست مدیریتی به `/admin/login` هدایت شود؛ مسیر `/admin/login` صفحهٔ ورود را برمی‌گرداند. `/healthz` سلامت پردازه و `/readyz` اتصال دیتابیس را بررسی می‌کنند. خطای مرورگر `ERR_CERT_COMMON_NAME_INVALID` قبل از دریافت پاسخ HTTP رخ می‌دهد؛ در آن وضعیت هنوز نمی‌توان از روی مرورگر دربارهٔ route یا دیتابیس نتیجه گرفت.
+
+علت مشخصی که در خروجی‌های این VPS دیده شد، دو مورد بود: درخواست بدون پورت به `:443` می‌رسید، درحالی‌که `xray` پورت 443 را گرفته بود و گواهی Microsoft نام IP را پوشش نمی‌داد؛ پس از انتقال Caddy به 9443، یک خطای 502 موقت هم از `connect: connection refused` به API ثبت شد. خروجی‌های بعدی شما نشان داد API روی 8000 پاسخ می‌دهد، `/admin` کد 303 به ورود می‌دهد و `/admin/login` کد 200 می‌دهد. برای مرورگر باید نشانی دارای `:9443` را باز کنید. این تشخیص بر مبنای خروجی‌های ارائه‌شده است؛ دسترسی SSH زنده به VPS از این محیط انجام نشده است.
+
+روی سرور، ابتدا وضعیت سرویس و پاسخ داخلی API را بررسی کنید. دستورهای HTTPS عمداً اعتبار گواهی را بررسی می‌کنند؛ از `curl -k` استفاده نکنید.
 
 ```bash
-sudo sh -c 'printf "%s\n" "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > /opt/chitoproject/.ssh/known_hosts'
-sudo chown chitoproject:chitoproject /opt/chitoproject/.ssh/known_hosts
-sudo chmod 600 /opt/chitoproject/.ssh/known_hosts
-sudo -u chitoproject env GIT_SSH_COMMAND='ssh -i /opt/chitoproject/.ssh/id_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/opt/chitoproject/.ssh/known_hosts' git ls-remote git@github.com:Alidl81/chitoproject.git refs/heads/main
+sudo systemctl status caddy chitoproject-api chitoproject-worker chitoproject-telegram chitoproject-bale --no-pager
+sudo journalctl -u caddy -u chitoproject-api -u chitoproject-worker -n 120 --no-pager
+sudo caddy version
+sudo caddy validate --config /etc/caddy/Caddyfile
+curl --fail --show-error -H 'Host: 46.249.107.214' http://127.0.0.1:8000/healthz
+curl --fail --show-error -H 'Host: 46.249.107.214' http://127.0.0.1:8000/readyz
+curl --fail --show-error --location https://46.249.107.214:9443/admin
+curl --fail --show-error --location https://46.249.107.214:9443/admin/login
+curl --fail --show-error https://46.249.107.214:9443/healthz
+curl --fail --show-error https://46.249.107.214:9443/readyz
 ```
 
-در صورت وجود known_hosts از قبل، قبل از اجرای دستور اول آن را بررسی و حفظ کنید. خروجی ls-remote باید SHA شاخه را نشان دهد. نصب‌کننده و deploy هر دو همین کلید و known_hosts را صریحاً استفاده می‌کنند.
+برای IP عمومی، [Let's Encrypt از گواهی IP پشتیبانی می‌کند](https://letsencrypt.org/2026/01/15/6day-and-ip-general-availability)؛ گواهی IP فقط با پروفایل `shortlived` و اعتبار ۱۶۰ ساعت صادر می‌شود. Caddy باید نسخهٔ دارای پشتیبانی صدور برای IP را داشته باشد؛ نصب‌کننده حداقل 2.11.1 را کنترل می‌کند و تمدید خودکار Caddy باید فعال بماند. گزینهٔ `profile shortlived` و خاموش‌کردن TLS-ALPN در صورت اشغال 443 باید با دستورالعمل رسمی [TLS در Caddyfile](https://caddyserver.com/docs/caddyfile/directives/tls) تنظیم شود. برای این VPS، لاگ Caddy نشان داده بود اعتبارسنجی HTTP-01 روی پورت 80 موفق شد. این روش نیاز دارد پورت 80 از اینترنت به Caddy برسد؛ مستندات [HTTPS خودکار Caddy](https://caddyserver.com/docs/automatic-https) را ببینید.
+
+نمونهٔ site block که باید برای این IP در پیکربندی واردشدهٔ Caddy فعال باشد:
+
+```caddyfile
+{
+    http_port 80
+    https_port 9443
+}
+
+http://46.249.107.214 {
+    redir https://46.249.107.214:9443{uri} permanent
+}
+
+https://46.249.107.214:9443 {
+    tls {
+        issuer acme https://acme-v02.api.letsencrypt.org/directory {
+            profile shortlived
+            disable_tlsalpn_challenge
+        }
+    }
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:8000
+}
+```
+
+اگر گواهیِ ارائه‌شده IP را در `subjectAltName` ندارد، نسخهٔ Caddy پایین‌تر از حداقل نصب‌کننده است، یا در لاگ‌ها خطای ACME دیده می‌شود، ابتدا فایل واقعی `/etc/caddy/Caddyfile` و فایل‌های import شده را بررسی کنید. پیش از اصلاح، فقط فایل اختصاصی ChitoProject را پشتیبان بگیرید؛ بلوک بالا را در `/etc/caddy/conf.d/chitoproject.caddy` تنظیم کنید، سپس اعتبارسنجی و reload انجام دهید:
 
 ```bash
-cd /opt/chitoproject-repo
-git status --short
-git fetch origin main
-git pull --ff-only origin main
+sudo cp -a /etc/caddy/conf.d/chitoproject.caddy "/etc/caddy/conf.d/chitoproject.caddy.bak.$(date -u +%Y%m%dT%H%M%SZ)"
+sudoedit /etc/caddy/conf.d/chitoproject.caddy
+sudo caddy validate --config /etc/caddy/Caddyfile
+sudo systemctl reload caddy
+```
+
+اگر `caddy validate` خطا داد، reload نکنید؛ نسخهٔ پشتیبان را به مسیر اصلی برگردانید. فایل دادهٔ Caddy را برای گرفتن گواهی جدید پاک نکنید. سپس تا صدور و ارائهٔ گواهی معتبر، دوباره URLهای HTTPS را با `curl` عادی بررسی نکنید؛ خطا را از خروجی Caddy و وضعیت پورت‌ها پیدا کنید.
+
+## نصب تازه
+
+نصب‌کننده برای Ubuntu 24.04 و 26.04 است؛ به پایتون apt وابستگی ندارد. پیش از اجرا باید uv در مسیری نصب باشد که کاربر `chitoproject` بتواند آن را اجرا کند و Python 3.12.16 تحت `/opt/chitoproject-python` با uv نصب شده باشد. Python سیستم تغییر نمی‌کند. نصب‌کننده به‌محض مشاهدهٔ مسیر نصب، دیتابیس/نقش هم‌نام، Caddy یا سرویس موجود متوقف می‌شود.
+
+در این نصب، کلید فقط‌خواندنی Deploy برای دریافت کد از VPS استفاده می‌شود و باید برای کاربر `chitoproject` قابل‌خواندن باشد؛ فایل `known_hosts` معتبر نیز باید در همان مسیر باشد. نصب‌کننده پیش از clone دسترسی همان کاربر به `main` را آزمایش می‌کند؛ اجرای clone با کاربر root کافی نیست.
+
+نمونهٔ نصب تازه (این بخش را برای نصب فعلی اجرا نکنید):
+
+```bash
 sudo bash scripts/install-vps.sh git@github.com:Alidl81/chitoproject.git 46.249.107.214
 ```
 
-اگر checkout تغییر محلی دارد، ابتدا آن را حفظ کنید و خطا را بررسی کنید. نصب‌کننده روی checkout این مسیر تغییری نمی‌دهد و نسخهٔ مستقل برنامه را در `/opt/chitoproject/app` کلون می‌کند. فایل محرمانه در `/etc/chitoproject/chitoproject.env` نگهداری می‌شود. نصب مستقیم از ZIP پشتیبانی نمی‌شود.
+نصب‌کننده ابتدا پورت‌های 80 و HTTPS انتخاب‌شده را بررسی می‌کند. اگر 443 اشغال باشد و 9443 آزاد باشد، Caddy را روی 9443 می‌گذارد؛ ورودی TCP همان پورت باید در فایروال VPS و ارائه‌دهنده باز باشد. برای IP از ACME Let's Encrypt و `profile shortlived` استفاده می‌شود و وقتی HTTPS روی پورت سفارشی است، TLS-ALPN خاموش و HTTP-01 روی پورت 80 استفاده می‌شود. پس از نصب، `/admin/activate` را فقط وقتی TLS گواهی عمومی معتبر دارد باز کنید.
 
-ورودی پورت TCP 80 و 443 از اینترنت باید به VPS برسد و پورت 8000 فقط محلی است. نصب از مخزن رسمی Caddy استفاده می‌کند و حداقل Caddy 2.11.1 می‌خواهد. برای IP از issuer رسمی Let's Encrypt و پروفایل shortlived استفاده می‌کند؛ اعتبار گواهی 160 ساعت است و Caddy در حال اجرا تمدید را انجام می‌دهد. صدور به دسترسی واقعی پورت‌ها و تأیید CA وابسته است. تا بررسی موفق گواهی مرورگر، کد فعال‌سازی را وارد نکنید:
+## مالک اصلی و تنظیم ربات‌ها
 
-```bash
-curl --fail --show-error https://46.249.107.214/readyz
-sudo journalctl -u caddy -n 100 --no-pager
-```
-
-کد یک‌بارمصرف نصب تا ۲۴ ساعت اعتبار دارد. در صورت فراموشی و تا پیش از ایجاد مالک، کد تازه با دستور زیر در ترمینال خصوصی ایجاد می‌شود و کد قبلی را باطل می‌کند:
+اگر حساب مالک اصلی هنوز ساخته نشده است، از مسیر برنامه کد فعال‌سازی یک‌بارمصرف بگیرید. کد در ترمینال همان سرور چاپ می‌شود؛ آن را در گفتگو، لاگ اشتراکی یا Git قرار ندهید. این دستور در صورت وجود مالک عمداً کد تازه نمی‌سازد.
 
 ```bash
 cd /opt/chitoproject/app
 sudo -u chitoproject /opt/chitoproject/venv/bin/python -m app.cli issue-owner-code
 ```
 
-پس از تأیید TLS، `https://46.249.107.214/admin/activate` را باز کنید، کد را وارد و حساب مالک را بسازید.
+کد را در `https://46.249.107.214:9443/admin/activate` وارد کنید (در نصب با پورت پیش‌فرض 443، `:9443` را حذف کنید). برای تنظیم توکن‌ها و نام‌کاربری‌های ربات، فایل محرمانه را با ویرایشگر امن باز کنید؛ مقدار توکن را در ترمینال، دستور history یا گفتگو کپی نکنید:
 
 ```bash
-sudo nano /etc/chitoproject/chitoproject.env
+sudoedit /etc/chitoproject/chitoproject.env
 ```
 
-توکن و نام کاربری هر ربات را در متغیرهای `TELEGRAM_BOT_TOKEN`، `TELEGRAM_BOT_USERNAME`، `BALE_BOT_TOKEN` و `BALE_BOT_USERNAME` وارد کنید؛ نام کاربری بدون @ است. سپس تمام سرویس‌ها را بازخوانی کنید تا پنل نیز نام‌های جدید را ببیند:
+متغیرهای `TELEGRAM_BOT_TOKEN`، `TELEGRAM_BOT_USERNAME`، `BALE_BOT_TOKEN` و `BALE_BOT_USERNAME` را با مقادیر خودتان پر کنید؛ نام‌کاربری بدون `@` است. بعد از ویرایش، سرویس‌ها را restart کنید و بدون چاپ توکن، اتصال را بررسی کنید:
 
 ```bash
 sudo systemctl restart chitoproject-api chitoproject-worker chitoproject-telegram chitoproject-bale
@@ -64,41 +111,15 @@ sudo systemctl status caddy chitoproject-api chitoproject-worker chitoproject-te
 sudo journalctl -u caddy -u chitoproject-api -u chitoproject-worker -u chitoproject-telegram -u chitoproject-bale -n 100 --no-pager
 ```
 
-اگر فقط یک توکن تنظیم شود، سرویس مربوط به پیام‌رسان دیگر ممکن است اجرا نشود. اطلاعات محرمانه را در مخزن، اسکرین‌شات و گفتگو منتشر نکنید.
+## پشتیبان‌گیری و پایش
 
-## به‌روزرسانی نصب Git
-
-```bash
-sudo bash /opt/chitoproject/app/scripts/deploy.sh
-```
-
-اسکریپت با checkout کثیف متوقف می‌شود، با کلید کاربر سرویس fetch می‌کند و تنها fast-forward انجام می‌دهد. پیش از به‌روزرسانی از داده‌ها پشتیبان بگیرید. migration پیش از restart اجرا می‌شود.
-
-## نصب دستی یا توسعه
-
-پایتون 3.12 و PostgreSQL نیاز است. `.env.example` را کپی و مقادیر production را کامل کنید؛ `SECRET_KEY` حداقل ۳۲ بایت تصادفی و `PUBLIC_BASE_URL` باید HTTPS باشد. سپس:
-
-```bash
-python -m pip install -e .
-python -m app.cli migrate
-python -m app.cli issue-owner-code
-```
-
-برای محیط توسعه، optional dependencyهای `.[dev]` شامل pytest، ruff و aiosqlite هستند. سرور وب، هر poller و worker را در process جدا اجرا کنید. SQLite را برای چند process تولیدی به کار نبرید.
-
-## پشتیبان‌گیری و بازیابی
-
-نصب خودکار `age` را فراهم می‌کند. کلید عمومی را از محیط امن تنظیم کنید:
+- `GET /healthz` زنده بودن پردازه و `GET /readyz` دسترسی دیتابیس را می‌سنجد.
+- برای بررسی HTTPS از curl عادی استفاده کنید تا اعتبار CA و تطابق IP بررسی شود؛ خطای TLS را با گزینهٔ ناامن پنهان نکنید.
+- فضای `/var/lib/chitoproject/uploads` و `/var/backups/chitoproject` و وضعیت queue/outbox را پایش کنید.
+- پشتیبان رمزگذاری‌شده با `age` بسازید؛ `BACKUP_RECIPIENT` را در محیط امن تنظیم کنید:
 
 ```bash
 sudo BACKUP_RECIPIENT='age1...' bash /opt/chitoproject/app/scripts/backup.sh
 ```
 
-فایل `.age` هم dump دیتابیس transcript و هم فایل‌های upload را در خود دارد. کلید خصوصی را جدا از VPS نگه دارید. قبل از بازگردانی، سرویس‌ها را متوقف کنید، archive را با کلید خصوصی رمزگشایی کنید و dump/file volume را طبق عملیات استاندارد PostgreSQL بازیابی کنید؛ recovery script خودکار ارائه نشده تا اشتباهاً دادهٔ زنده جایگزین نشود.
-
-## پایش اولیه
-
-- `GET /healthz` زنده بودن پردازه و `GET /readyz` اتصال دیتابیس را بررسی می‌کند.
-- فضای دیسک `/var/lib/chitoproject/uploads` و `/var/backups/chitoproject` را مانیتور کنید.
-- وضعیت queue/outbox را در پنل و journal بررسی کنید.
-- قبل از استفادهٔ واقعی، اتصال واقعی هر توکن و ارسال/دریافت فایل در همان پیام‌رسان را به‌صورت کنترل‌شده بررسی کنید.
+کلید خصوصی رمزگشایی را بیرون از VPS نگه دارید. بازیابی دیتابیس و بارگذاری‌ها عملیات جداگانه است و خودکار اجرا نمی‌شود تا دادهٔ زنده تصادفاً جایگزین نشود.
