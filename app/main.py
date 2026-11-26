@@ -40,9 +40,8 @@ app = FastAPI(
     openapi_url=None,
 )
 if settings.is_production:
-    host = urlparse(settings.public_base_url).hostname
-    if host:
-        app.add_middleware(TrustedHostMiddleware, allowed_hosts=[host])
+    hosts = {urlparse(url).hostname for url in (settings.public_base_url, settings.checkout_base_url)}
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=sorted(host for host in hosts if host))
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 app.include_router(web_router)

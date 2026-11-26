@@ -21,16 +21,19 @@ from app.bot.operations import (
     schedule_reminders,
 )
 from app.bot.payment import (
+    PAYMENT_WINDOW,
     REVISIONS_PER_STAGE,
     configured_for,
     is_expired,
     owned_stage,
+    stage_configured,
     stage_job,
     stage_payload,
 )
 from app.bot.review import dismiss_previews, record_decision, support_context
 from app.bot.transport import BotAdapter, ProviderError
 from app.chart_png import chart_png
+from app.checkout import order_link
 from app.config import settings
 from app.models import (
     AdminUser,
@@ -1076,6 +1079,12 @@ async def _stage_action(db: AsyncSession, chat: Conversation, action: str, stage
     stage, _ = pair
     payload = stage_payload(stage)
     back = [_button("بازگشت", "c:projects")]
+    if stage.website_checkout and stage.status in {"awaiting_payment", "paid"}:
+        label = "صفحهٔ دریافت فایل" if stage.status == "paid" else "صفحهٔ سفارش"
+        text = ("پرداخت تأیید شد. فایل و رمز در صفحهٔ سفارش آماده است." if stage.status == "paid"
+                else "پیش‌نمایش تأیید شد. پرداخت و دریافت فایل در صفحهٔ سفارش انجام می‌شه.")
+        await _queue_ui(db, chat, text, [[_button(label, url=order_link(stage))], back], update)
+        return
     if action == "ps":
         if stage.status == "paid":
             keyboard = [[_button("دریافت فایل و رمز", f"c:pk:{payload}", style="success")], back]
@@ -1094,7 +1103,7 @@ async def _stage_action(db: AsyncSession, chat: Conversation, action: str, stage
             keyboard, text = [back], "تیم در حال بررسی اصلاحاته."
         await _queue_ui(db, chat, text, keyboard, update)
         return
-    if action == "pa" and stage.status == "preview_pending" and configured_for(chat.platform):
+    if action == "pa" and stage.status == "preview_pending" and stage_configured(chat.platform, stage):
         preview_sent = await db.scalar(select(OutboxMessage.id).where(
             OutboxMessage.dedupe_key == f"stage_video:{payload}", OutboxMessage.status == "sent",
         ))
@@ -1102,6 +1111,12 @@ async def _stage_action(db: AsyncSession, chat: Conversation, action: str, stage
             await _queue_ui(db, chat, "اول پیش‌نمایش این نسخه رو ببین.", [[_button("پیش‌نمایش", f"c:ps:{payload}")]], update)
             return
         stage.status = "awaiting_payment"
+        if stage.website_checkout:
+            stage.deadline = now_utc() + PAYMENT_WINDOW
+            await _queue_ui(db, chat, "پیش‌نمایش تأیید شد. پرداخت و دریافت فایل از صفحهٔ سفارش.", [
+                [_button("صفحهٔ سفارش", url=order_link(stage))], back,
+            ], update)
+            return
         await stage_job(db, chat, stage, "stage_card")
         await _queue_ui(db, chat, "تأیید شد؛ اطلاعات پرداخت می‌رسه.", [
             [_button("ارسال رسید", f"c:pe:{payload}")], back,
@@ -1154,7 +1169,7 @@ async def _stage_input(db: AsyncSession, adapter: BotAdapter, chat: Conversation
                             event_type="stage_revision", note=f"مرحلهٔ {stage.number}، اصلاح {stage.revision_requests} از ۲: {reason}", private=False))
         await _show_home(db, chat, update, notice=f"درخواست اصلاح {stage.revision_requests} از ۲ برای همین مرحله ثبت شد.")
         return
-    if stage.status != "awaiting_payment" or not stage.deadline:
+    if stage.website_checkout or stage.status != "awaiting_payment" or not stage.deadline:
         await _show_home(db, chat, update, notice="این مرحله در وضعیت دریافت رسید نیست.")
         return
     try:
@@ -1247,16 +1262,10 @@ async def handle_update(db: AsyncSession, platform: str, update: dict[str, Any],
         if not staff and conversation.state == "home" and data.startswith("c:faq:"):
             item = FAQ.get(data.removeprefix("c:faq:"))
             if item:
-                answer = item[1]
-                if data == "c:faq:receipt" and not configured_for(conversation.platform):
-                    answer = "بعد از تأیید ویدئو، برای هماهنگی پرداخت و تحویل با پشتیبانی در تماس باش."
-                await _queue_ui(db, conversation, answer, [[_button("برگشت به سؤال‌ها", "c:faq")]], update)
+                await _queue_ui(db, conversation, item[1], [[_button("برگشت به سؤال‌ها", "c:faq")]], update)
                 return
         if not staff and conversation.state == "review" and data == "c:payment_info":
-            guide = PAYMENT_GUIDE if configured_for(conversation.platform) else (
-                "پرداخت می‌تونه یک یا چند مرحله داشته باشه. برای هماهنگی روش پرداخت و تحویل با پشتیبانی در تماس باش."
-            )
-            await _queue_ui(db, conversation, guide, [[_button("برگشت به خلاصه", "c:review")]], update)
+            await _queue_ui(db, conversation, PAYMENT_GUIDE, [[_button("برگشت به خلاصه", "c:review")]], update)
             return
         if not staff and conversation.state == "review" and data == "c:extras":
             conversation.state = "extras"

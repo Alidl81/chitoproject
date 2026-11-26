@@ -23,15 +23,18 @@ from app.bot.flow import _review_delivery, document_budget
 from app.bot.flow import queue_customer_message as _queue_customer_message
 from app.bot.operations import TERMINAL, cancel_reminders, enqueue_text, schedule_reminders
 from app.bot.payment import (
+    PAYMENT_WINDOW,
     asset_path,
     configured_for,
     create_encrypted_archive,
     is_expired,
+    stage_configured,
     stage_job,
 )
 from app.bot.review import dismiss_previews
 from app.calendar_fa import from_solar, parse_solar, solar_date, solar_parts
 from app.chart_png import chart_png
+from app.checkout import MAX_AMOUNT_TOMAN
 from app.config import settings
 from app.database import get_session
 from app.models import (
@@ -373,7 +376,7 @@ async def publish_payment_stage(project_id: str, request: Request, db: AsyncSess
     chat = await db.get(Conversation, project.conversation_id) if project else None
     if (not project or project.archived_at or project.status != "in_progress" or not chat
             or chat.customer_id != project.customer_id or chat.admin_id is not None or not configured_for(chat.platform)
-            or not 1 <= number <= stage_count <= 10 or not 0 < amount_toman <= 10**12
+            or not 1 <= number <= stage_count <= 10 or not 0 < amount_toman <= MAX_AMOUNT_TOMAN
             or not title.strip() or not video or not (video.filename or "").lower().endswith(".mp4")):
         return redirect(target, "stage-invalid")
     delivery = await db.get(ProjectDelivery, delivery_id)
@@ -406,7 +409,7 @@ async def publish_payment_stage(project_id: str, request: Request, db: AsyncSess
     old = (stage.preview_key, stage.archive_key) if stage else ()
     if not stage:
         stage = PaymentStage(id=stage_id, project_id=project.id, number=number, stage_count=stage_count,
-                             title=title.strip()[:140], amount_toman=amount_toman)
+                             title=title.strip()[:140], amount_toman=amount_toman, website_checkout=True)
         db.add(stage)
     stage.delivery_id = delivery_id
     stage.version, stage.status = version, "preview_pending"
@@ -443,21 +446,24 @@ async def review_stage_receipt(stage_id: str, request: Request, db: AsyncSession
     chat = await db.get(Conversation, project.conversation_id) if project else None
     target = f"/admin/projects/{project.id}" if project else "/admin/projects"
     if (not project or project.archived_at or project.status != "in_progress" or not project.staged_payment
-            or not chat or chat.customer_id != project.customer_id or chat.platform != "bale"):
+            or not chat or chat.customer_id != project.customer_id or chat.admin_id is not None):
         return redirect(target, "stage-invalid")
     callback = f"{stage.id}:{stage.version}"
-    if decision == "reopen" and stage.status == "awaiting_payment" and is_expired(stage) and configured_for(chat.platform):
-        stage.deadline = None
-        await stage_job(db, chat, stage, "stage_card")
+    if decision == "reopen" and stage.status == "awaiting_payment" and is_expired(stage) and stage_configured(chat.platform, stage):
+        if stage.website_checkout:
+            stage.deadline = now_utc() + PAYMENT_WINDOW
+        else:
+            stage.deadline = None
+            await stage_job(db, chat, stage, "stage_card")
         _audit(db, admin, "stage.payment_reopened", "project", project.id, {"number": stage.number})
-    elif decision == "reject" and stage.status == "receipt_pending" and 5 <= len(reason.strip()) <= 500:
+    elif decision == "reject" and not stage.website_checkout and stage.status == "receipt_pending" and 5 <= len(reason.strip()) <= 500:
         stage.status = "awaiting_payment"
         await enqueue_text(
             db, chat, f"رسید مرحلهٔ {stage.number} تأیید نشد.\nدلیل: {reason.strip()}",
             f"receipt-return:{stage.id}:{random_token(8)}", keyboard=[[{"text": "ارسال رسید", "callback_data": f"c:pe:{callback}"}]],
         )
         _audit(db, admin, "stage.receipt_rejected", "project", project.id, {"number": stage.number, "reason": reason.strip()})
-    elif decision == "confirm" and stage.status == "receipt_pending" and stage.receipt_key and configured_for(chat.platform):
+    elif decision == "confirm" and not stage.website_checkout and stage.status == "receipt_pending" and stage.receipt_key and stage_configured(chat.platform, stage):
         reference = reference.strip().translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
         if amount_toman != stage.amount_toman or not re.fullmatch(r"[0-9A-Za-z-]{4,80}", reference):
             return redirect(target, "stage-invalid")

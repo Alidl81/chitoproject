@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.files import safe_filename
+from app.checkout import website_enabled
 from app.config import settings
 from app.models import (
     Conversation,
@@ -36,7 +37,13 @@ def card_number() -> str | None:
 
 def configured_for(platform: str) -> bool:
     key = settings.payment_archive_key
-    return platform == "bale" and bool(card_number() and key and len(key.get_secret_value().encode()) >= 32)
+    return platform in {"telegram", "bale"} and website_enabled() and bool(
+        key and len(key.get_secret_value().encode()) >= 32
+    )
+
+
+def stage_configured(platform: str, stage: PaymentStage) -> bool:
+    return configured_for(platform) if stage.website_checkout else platform == "bale" and bool(card_number())
 
 
 def asset_path(key: str) -> Path:
@@ -93,7 +100,7 @@ def stage_payload(stage: PaymentStage) -> str:
 
 
 async def owned_stage(db: AsyncSession, chat: Conversation, stage_id: str, version: int, *, lock: bool = True):
-    if chat.platform != "bale" or not chat.customer_id or chat.admin_id is not None:
+    if chat.platform not in {"bale", "telegram"} or not chat.customer_id or chat.admin_id is not None:
         return None
     query = select(PaymentStage, Project).join(Project, Project.id == PaymentStage.project_id).where(
         PaymentStage.id == stage_id, PaymentStage.version == version, Project.staged_payment.is_(True),
@@ -101,7 +108,7 @@ async def owned_stage(db: AsyncSession, chat: Conversation, stage_id: str, versi
         Project.archived_at.is_(None), Project.status.not_in(("declined", "canceled")),
     )
     if lock:
-        query = query.with_for_update()
+        query = query.with_for_update(of=PaymentStage)
     return (await db.execute(query)).one_or_none()
 
 

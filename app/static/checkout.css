@@ -1,0 +1,24 @@
+:root { color-scheme: light dark; --bg:#f0f5fc; --paper:#fff; --ink:#132541; --muted:#435470; --edge:#d7e1ef; --action:#164fb6; --on-action:#fff; --success:#146141; }
+@media (prefers-color-scheme:dark) {
+  :root { --bg:#101a2b; --paper:#172338; --ink:#eef4ff; --muted:#bdcde3; --edge:#344764; --action:#a7c9ff; --on-action:#102745; --success:#a1edc6; }
+}
+* { box-sizing:border-box; }
+body { margin:0; min-height:100vh; color:var(--ink); background:var(--bg); font:1rem/1.8 Tahoma, system-ui, sans-serif; }
+main { width:min(100% - 2rem, 35rem); margin:clamp(1rem, 6vw, 4rem) auto; }
+header { display:flex; align-items:center; gap:.6rem; padding-block-end:1rem; }
+.logo { display:grid; place-items:center; width:2.5rem; height:2.5rem; border-radius:.8rem; background:var(--action); color:var(--on-action); }
+article { padding:clamp(1rem, 4vw, 2rem); background:var(--paper); border:1px solid var(--edge); border-radius:1.15rem; }
+h1 { line-height:1.4; margin:.25rem 0; font-size:clamp(1.3rem, 5vw, 1.8rem); overflow-wrap:anywhere; }
+p, dt { color:var(--muted); }
+.tag { font-size:.875rem; margin:0; }
+dl { display:grid; grid-template-columns:1fr auto; padding:1rem; border:1px solid var(--edge); border-radius:.75rem; gap:.4rem .8rem; }
+dd { margin:0; text-align:end; font-weight:bold; }
+button, a.button { display:block; width:100%; text-align:center; min-height:2.75rem; padding:.6rem .8rem; border:1px solid var(--action); border-radius:.65rem; background:var(--action); color:var(--on-action); font:inherit; text-decoration:none; font-weight:bold; cursor:pointer; }
+button[hidden] { display:none; }
+form + form { margin-block-start:.65rem; }
+.secondary { color:var(--action); background:transparent; }
+.success { color:var(--success); font-weight:bold; }
+.copy { display:flex; gap:.5rem; align-items:center; flex-wrap:wrap; }
+.copy button { width:auto; }
+code { display:inline-block; max-width:100%; overflow-wrap:anywhere; border:1px solid var(--edge); padding:.45rem; border-radius:.5rem; }
+:focus-visible { outline:2px solid var(--ink); outline-offset:3px; }

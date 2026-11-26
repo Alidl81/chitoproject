@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>سفارش من · ChitoProject</title>
+  <link rel="stylesheet" href="/static/checkout.css">
+  <script src="/static/checkout.js" defer></script>
+</head>
+<body>
+<main>
+  <header><span class="logo" aria-hidden="true">چ</span><b dir="ltr">ChitoProject</b></header>
+  <article aria-labelledby="order-title">
+    {% if not stage %}
+      <h1 id="order-title">سفارش من</h1>
+      <p id="access-note">برای دیدن این مرحله، لینک شخصی سفارش را از بخش پیگیری ربات باز کن.</p>
+      {% if entry %}
+      <form method="post" action="/orders/access" id="order-access" hidden>
+        <input type="hidden" name="token" id="order-token">
+        <button>باز کردن سفارش</button>
+      </form>
+      {% endif %}
+    {% else %}
+      <p class="tag">مرحلهٔ {{ stage.number }} از {{ stage.stage_count }}</p>
+      <h1 id="order-title">{{ stage.title }}</h1>
+      <p>{{ project.title }} · <bdi>{{ project.public_id }}</bdi></p>
+      <dl><dt>مبلغ این مرحله</dt><dd>{{ '{:,}'.format(stage.amount_toman) }} تومان</dd>
+      {% if deadline and not paid %}<dt>مهلت پرداخت (تهران)</dt><dd>{{ deadline }}</dd>{% endif %}
+      {% if paid %}<dt>شماره پیگیری</dt><dd><bdi>{{ stage.gateway_reference }}</bdi></dd>{% endif %}</dl>
+      {% if paid %}
+      <p role="status" class="success">پرداخت تأیید شد. فایل این مرحله آمادهٔ دانلود است.</p>
+      <a class="button" href="/orders/{{ stage.id }}/download">دانلود فایل پروژه</a>
+      <p>فایل ZIP را با برنامه‌ای مثل 7-Zip باز کن و در کادر رمز، کد زیر را وارد کن.</p>
+      <div class="copy"><code id="archive-password" dir="ltr">{{ password }}</code><button type="button" id="copy-password" hidden>کپی رمز</button></div>
+      <small id="copy-status" role="status"></small>
+      {% else %}
+      {% if result == 'unavailable' or not merchant_ready %}
+        <p role="status">درگاه پرداخت فعلاً در دسترس نیست. بعداً به همین سفارش برگرد.</p>
+      {% elif result == 'unverified' %}
+        <p role="status">پرداخت هنوز تأیید نشده. اگر مبلغ از حسابت کم شده، وضعیت را دوباره بررسی کن.</p>
+      {% elif expired %}
+        <p role="status">مهلت شروع پرداخت گذشته. اگر قبلاً پرداخت کردی، وضعیت را بررسی کن.</p>
+      {% else %}
+        <p>بعد از تأیید پرداخت، لینک دانلود و رمز در همین صفحه نمایش داده می‌شه.</p>
+      {% endif %}
+      {% if payable %}
+      <form method="post" action="/orders/{{ stage.id }}/pay">
+        <button>{{ 'ادامهٔ پرداخت در زرین‌پال' if stage.gateway_authority else 'پرداخت در زرین‌پال' }}</button>
+      </form>
+      {% endif %}
+      {% if stage.gateway_authority and merchant_ready %}
+      <form method="post" action="/orders/{{ stage.id }}/verify">
+        <button class="secondary">بررسی دوبارهٔ پرداخت</button>
+      </form>
+      {% endif %}
+      {% endif %}
+    {% endif %}
+  </article>
+</main>
+</body>
+</html>

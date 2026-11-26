@@ -203,6 +203,9 @@ class PaymentStage(Base):
     deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     receipt_key: Mapped[str | None] = mapped_column(String(32))
     bank_reference: Mapped[str | None] = mapped_column(String(100), unique=True)
+    website_checkout: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    gateway_authority: Mapped[str | None] = mapped_column(String(36), unique=True, index=True)
+    gateway_reference: Mapped[str | None] = mapped_column(String(36), unique=True, index=True)
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 

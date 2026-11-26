@@ -9,8 +9,8 @@ from sqlalchemy import select
 from app.bot.flow import _stage_action, _stage_input
 from app.bot.payment import (
     archive_password,
-    configured_for,
     create_encrypted_archive,
+    stage_configured,
     stage_job,
     stage_payload,
 )
@@ -34,8 +34,6 @@ async def test_payment_stage_is_versioned_and_releases_zip_before_password(db_co
     db, _ = db_context
     monkeypatch.setattr(settings, "manual_payment_card", SecretStr("0" * 16))
     monkeypatch.setattr(settings, "payment_archive_key", SecretStr("test archive key".ljust(40, "!")))
-    assert configured_for("bale")
-    assert not configured_for("telegram")
 
     customer = Customer(display_name="مینا")
     db.add(customer)
@@ -57,6 +55,8 @@ async def test_payment_stage_is_versioned_and_releases_zip_before_password(db_co
                                mime_type="text/plain", size_bytes=len(contents))
     stage = PaymentStage(project_id=project.id, delivery_id=delivery.id, number=1, stage_count=2, title="نمونه",
                          amount_toman=50000, preview_key="b" * 32, archive_key="c" * 32)
+    assert stage_configured("bale", stage)
+    assert not stage_configured("telegram", stage)
     db.add_all([file, stage])
     await db.flush()
 

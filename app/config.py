@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -17,6 +18,8 @@ class Settings(BaseSettings):
     bale_bot_token: SecretStr | None = None
     telegram_bot_username: str = ""
     bale_bot_username: str = ""
+    checkout_base_url: str = ""
+    zarinpal_merchant_id: SecretStr | None = None
     manual_payment_card: SecretStr | None = None
     payment_archive_key: SecretStr | None = None
     uploads_dir: Path = Path("./data/uploads")
@@ -46,6 +49,11 @@ class Settings(BaseSettings):
             raise ValueError("MAX_ARCHIVE_MB must be between 20 and 10000")
         if not 1 <= self.bot_worker_concurrency <= 16:
             raise ValueError("BOT_WORKER_CONCURRENCY must be between 1 and 16")
+        if self.checkout_base_url:
+            url = urlsplit(self.checkout_base_url)
+            if (url.scheme != "https" or not url.hostname or url.username is not None
+                    or url.path not in {"", "/"} or url.query or url.fragment):
+                raise ValueError("CHECKOUT_BASE_URL must be an HTTPS origin")
         if self.is_production:
             secret = self.secret_key.get_secret_value()
             if len(secret.encode()) < 32 or secret.startswith("GENERATE_"):

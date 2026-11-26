@@ -27,6 +27,7 @@
         <summary>{{ stage.number }} از {{ stage.stage_count }} · {{ stage.title }} · {{ stage_labels[stage.status] }}</summary>
         <p>{{ '{:,}'.format(stage.amount_toman) }} تومان · نسخهٔ {{ stage.version }} · اصلاح {{ stage.revision_requests }} از ۲</p>
         {% if stage.deadline %}<p>پایان مهلت: {{ format_local(stage.deadline) }}</p>{% endif %}
+        {% if stage.website_checkout %}<p>پرداخت و تحویل در سایت{% if stage.gateway_reference %} · شماره پیگیری زرین‌پال <bdi>{{ stage.gateway_reference }}</bdi>{% endif %}</p>{% endif %}
         {% if stage.status == 'receipt_pending' %}
           <a class="button secondary" href="/admin/payment-stages/{{ stage.id }}/receipt">دریافت رسید</a>
           <form method="post" action="/admin/payment-stages/{{ stage.id }}/receipt" class="form-stack" data-confirm="مبلغ و شناسه را با گردش واقعی حساب مقصد تطبیق داده‌اید؟">
@@ -58,7 +59,7 @@
           <label>عنوان مرحله<input name="title" maxlength="140" required></label>
           <label>شمارهٔ مرحله<input name="number" type="number" min="1" max="10" value="1" required></label>
           <label>تعداد کل مراحل<input name="stage_count" type="number" min="1" max="10" value="1" required></label>
-          <label>مبلغ توافق‌شده (تومان)<input name="amount_toman" type="number" min="1" required></label>
+          <label>مبلغ توافق‌شده (تومان)<input name="amount_toman" type="number" min="1" max="100000000" required></label>
           <label>تحویل آمادهٔ بررسی<select name="delivery_id" required>
             {% for delivery in pending_deliveries %}<option value="{{ delivery.id }}">{{ format_local(delivery.created_at) }}</option>{% endfor %}
           </select></label>

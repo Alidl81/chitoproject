@@ -19,9 +19,9 @@ from app.bot.payment import (
     archive_password,
     asset_path,
     card_number,
-    configured_for,
     is_expired,
     owned_stage,
+    stage_configured,
     stage_job,
 )
 from app.bot.transport import BotAdapter, ProviderError, configured_adapters
@@ -233,10 +233,14 @@ async def _send_stage_job(db, adapter, row, conversation):
             keyboard[0].append({"text": "درخواست اصلاح", "callback_data": f"c:pr:{payload}"})
         else:
             keyboard.append([{"text": "پیگیری با پشتیبانی", "callback_data": "c:home"}])
-        await adapter.send_preview_video(row.chat_id, asset_path(stage.preview_key),
-                                         f"مرحلهٔ {stage.number} از {stage.stage_count} · {stage.title}\nمبلغ: {stage.amount_toman:,} تومان", keyboard)
+        caption = f"مرحلهٔ {stage.number} از {stage.stage_count} · {stage.title}"
+        if not stage.website_checkout:
+            caption += f"\nمبلغ: {stage.amount_toman:,} تومان"
+        await adapter.send_preview_video(row.chat_id, asset_path(stage.preview_key), caption, keyboard)
         return
-    if operation == "stage_card" and stage.status == "awaiting_payment" and configured_for(conversation.platform):
+    if stage.website_checkout:
+        raise ProviderError("use_website_checkout", permanent=True)
+    if operation == "stage_card" and stage.status == "awaiting_payment" and stage_configured(conversation.platform, stage):
         if stage.deadline and is_expired(stage):
             raise ProviderError("payment_expired", permanent=True)
         card = card_number()
