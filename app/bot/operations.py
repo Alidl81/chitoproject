@@ -90,7 +90,7 @@ async def approve_delivery(db: AsyncSession, actor: AdminUser, delivery_id: str)
         return False
     project = await db.get(Project, delivery.project_id, with_for_update=True)
     await db.refresh(delivery)
-    if (not project or project.archived_at or project.status != "in_progress" or delivery.status != "pending"
+    if (not project or project.staged_payment or project.archived_at or project.status != "in_progress" or delivery.status != "pending"
             or not delivery.submitted_by or project.assigned_admin_id != delivery.submitted_by):
         return False
     customer = await db.get(Conversation, project.conversation_id)

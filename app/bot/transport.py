@@ -104,6 +104,14 @@ class BotAdapter:
         }, files={"photo": ("statistics.png", image, "image/png")})
         return str(result["message_id"])
 
+    async def send_preview_video(self, chat_id: str, path: Path, caption: str, keyboard) -> str:
+        with path.open("rb") as video:
+            result = await self._api("sendVideo", {
+                "chat_id": chat_id, "caption": caption,
+                "reply_markup": json.dumps({"inline_keyboard": self._keyboard(keyboard)}, ensure_ascii=False),
+            }, files={"video": ("preview.mp4", video, "video/mp4")})
+        return str(result["message_id"])
+
     async def reuse_document(self, chat_id: str, file_id: str, caption: str) -> str:
         result = await self._api("sendDocument", {"chat_id": chat_id, "document": file_id, "caption": caption})
         return str(result["message_id"])

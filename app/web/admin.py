@@ -21,7 +21,14 @@ from app.bot.files import (
 )
 from app.bot.flow import _review_delivery, document_budget
 from app.bot.flow import queue_customer_message as _queue_customer_message
-from app.bot.operations import TERMINAL, cancel_reminders, schedule_reminders
+from app.bot.operations import TERMINAL, cancel_reminders, enqueue_text, schedule_reminders
+from app.bot.payment import (
+    asset_path,
+    configured_for,
+    create_encrypted_archive,
+    is_expired,
+    stage_job,
+)
 from app.bot.review import dismiss_previews
 from app.calendar_fa import from_solar, parse_solar, solar_date, solar_parts
 from app.chart_png import chart_png
@@ -42,6 +49,7 @@ from app.models import (
     ConversationRead,
     Customer,
     OutboxMessage,
+    PaymentStage,
     PlatformIdentity,
     Project,
     ProjectDelivery,
@@ -336,15 +344,160 @@ async def project_detail(project_id: str, request: Request, db: AsyncSession = D
     members = [member for member in members if has_permission(member.role, "projects.execute")
                or has_permission(member.role, "projects.manage")]
     deliveries = list(await db.scalars(select(ProjectDelivery).where(
-        ProjectDelivery.project_id == project.id, ProjectDelivery.status.in_(("pending", "approved", "rejected")),
+        ProjectDelivery.project_id == project.id, ProjectDelivery.status.in_(("pending", "approved", "rejected", "stage_reviewed")),
     ).order_by(ProjectDelivery.created_at.desc()).limit(20)))
     delivery_files = list(await db.scalars(select(ProjectDeliveryFile).where(
         ProjectDeliveryFile.delivery_id.in_([item.id for item in deliveries]),
     ).order_by(ProjectDeliveryFile.original_name)))
+    stages = list(await db.scalars(select(PaymentStage).where(
+        PaymentStage.project_id == project.id,
+    ).order_by(PaymentStage.number)))
     return _page(request, "project_detail.html", admin, auth, project=project, customer=customer,
+                 stages=stages, stage_available=bool(conversation and configured_for(conversation.platform)),
                  deliveries=deliveries, delivery_files=delivery_files, conversation=conversation, transcript=transcript, transcript_files=transcript_files, events=events, attachments=attachments,
                  members=members, status_labels=STATUS_LABELS, can_manage=has_permission(admin.role, "projects.manage"),
                  can_reply=has_permission(admin.role, "messages.reply"), can_review=has_permission(admin.role, "projects.review"))
+
+
+@router.post("/projects/{project_id}/payment-stages")
+async def publish_payment_stage(project_id: str, request: Request, db: AsyncSession = Depends(get_session),
+                                number: int = Form(0), stage_count: int = Form(0), title: str = Form(""),
+                                amount_toman: int = Form(0), delivery_id: str = Form(""),
+                                video: UploadFile | None = File(None)):
+    guard = await _guard(request, db, "projects.manage", post=True)
+    if not isinstance(guard, tuple):
+        return guard
+    admin, _ = guard
+    target = f"/admin/projects/{project_id}"
+    project = await db.get(Project, project_id, with_for_update=True)
+    chat = await db.get(Conversation, project.conversation_id) if project else None
+    if (not project or project.archived_at or project.status != "in_progress" or not chat
+            or chat.customer_id != project.customer_id or chat.admin_id is not None or not configured_for(chat.platform)
+            or not 1 <= number <= stage_count <= 10 or not 0 < amount_toman <= 10**12
+            or not title.strip() or not video or not (video.filename or "").lower().endswith(".mp4")):
+        return redirect(target, "stage-invalid")
+    delivery = await db.get(ProjectDelivery, delivery_id)
+    if not delivery or delivery.project_id != project.id or delivery.status != "pending":
+        return redirect(target, "stage-invalid")
+    stage = await db.scalar(select(PaymentStage).where(
+        PaymentStage.project_id == project.id, PaymentStage.number == number,
+    ))
+    previous = await db.scalar(select(PaymentStage).where(
+        PaymentStage.project_id == project.id, PaymentStage.number == number - 1,
+    )) if number > 1 else None
+    if (number > 1 and (not previous or previous.status != "paid" or previous.stage_count != stage_count)
+            or stage and (stage.status != "changes_requested" or stage.stage_count != stage_count
+                          or stage.amount_toman != amount_toman or stage.title != title.strip()[:140])):
+        return redirect(target, "stage-invalid")
+    files = list(await db.scalars(select(ProjectDeliveryFile).where(
+        ProjectDeliveryFile.delivery_id == delivery_id,
+    ).order_by(ProjectDeliveryFile.id)))
+    stage_id, version = (stage.id, stage.version + 1) if stage else (new_id(), 1)
+    preview = None
+    try:
+        preview = await asyncio.to_thread(save_document, video.file, "preview.mp4", min(settings.max_upload_mb, 20) * 1024 * 1024)
+        if preview.mime_type != "video/mp4":
+            raise ValueError
+        archive_key = await asyncio.to_thread(create_encrypted_archive, stage_id, version, files)
+    except (OSError, ValueError, UploadRejected):
+        if preview:
+            preview.path.unlink(missing_ok=True)
+        return redirect(target, "stage-invalid")
+    old = (stage.preview_key, stage.archive_key) if stage else ()
+    if not stage:
+        stage = PaymentStage(id=stage_id, project_id=project.id, number=number, stage_count=stage_count,
+                             title=title.strip()[:140], amount_toman=amount_toman)
+        db.add(stage)
+    stage.delivery_id = delivery_id
+    stage.version, stage.status = version, "preview_pending"
+    stage.preview_key, stage.archive_key = preview.stored_key, archive_key
+    project.staged_payment = True
+    delivery.status = "stage_reviewed"
+    await dismiss_previews(db, f"delivery-review:{delivery.id}")
+    await stage_job(db, chat, stage, "stage_video")
+    _audit(db, admin, "stage.preview_published", "project", project.id, {"number": number, "version": version})
+    try:
+        await db.commit()
+    except Exception:
+        preview.path.unlink(missing_ok=True)
+        asset_path(archive_key).unlink(missing_ok=True)
+        raise
+    for key in old:
+        try:
+            asset_path(key).unlink(missing_ok=True)
+        except (OSError, ValueError):
+            pass
+    return redirect(target, "stage-preview-queued")
+
+
+@router.post("/payment-stages/{stage_id}/receipt")
+async def review_stage_receipt(stage_id: str, request: Request, db: AsyncSession = Depends(get_session),
+                               decision: str = Form(""), amount_toman: int = Form(0),
+                               reference: str = Form(""), reason: str = Form("")):
+    guard = await _guard(request, db, "projects.manage", post=True)
+    if not isinstance(guard, tuple):
+        return guard
+    admin, _ = guard
+    stage = await db.get(PaymentStage, stage_id, with_for_update=True)
+    project = await db.get(Project, stage.project_id, with_for_update=True) if stage else None
+    chat = await db.get(Conversation, project.conversation_id) if project else None
+    target = f"/admin/projects/{project.id}" if project else "/admin/projects"
+    if (not project or project.archived_at or project.status != "in_progress" or not project.staged_payment
+            or not chat or chat.customer_id != project.customer_id or chat.platform != "bale"):
+        return redirect(target, "stage-invalid")
+    callback = f"{stage.id}:{stage.version}"
+    if decision == "reopen" and stage.status == "awaiting_payment" and is_expired(stage) and configured_for(chat.platform):
+        stage.deadline = None
+        await stage_job(db, chat, stage, "stage_card")
+        _audit(db, admin, "stage.payment_reopened", "project", project.id, {"number": stage.number})
+    elif decision == "reject" and stage.status == "receipt_pending" and 5 <= len(reason.strip()) <= 500:
+        stage.status = "awaiting_payment"
+        await enqueue_text(
+            db, chat, f"رسید مرحلهٔ {stage.number} تأیید نشد.\nدلیل: {reason.strip()}",
+            f"receipt-return:{stage.id}:{random_token(8)}", keyboard=[[{"text": "ارسال رسید", "callback_data": f"c:pe:{callback}"}]],
+        )
+        _audit(db, admin, "stage.receipt_rejected", "project", project.id, {"number": stage.number, "reason": reason.strip()})
+    elif decision == "confirm" and stage.status == "receipt_pending" and stage.receipt_key and configured_for(chat.platform):
+        reference = reference.strip().translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
+        if amount_toman != stage.amount_toman or not re.fullmatch(r"[0-9A-Za-z-]{4,80}", reference):
+            return redirect(target, "stage-invalid")
+        if await db.scalar(select(PaymentStage.id).where(PaymentStage.bank_reference == reference)):
+            return redirect(target, "stage-reference-used")
+        stage.bank_reference, stage.verified_at, stage.status = reference, now_utc(), "paid"
+        await stage_job(db, chat, stage, "stage_zip")
+        if stage.number == stage.stage_count:
+            project.status = "completed"
+            await cancel_reminders(db, project.id)
+        _audit(db, admin, "stage.receipt_verified", "project", project.id, {"number": stage.number, "amount_toman": amount_toman})
+    else:
+        return redirect(target, "stage-invalid")
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        return redirect(target, "stage-reference-used")
+    return redirect(target, "stage-updated")
+
+
+@router.get("/payment-stages/{stage_id}/receipt")
+async def download_stage_receipt(stage_id: str, request: Request, db: AsyncSession = Depends(get_session)):
+    guard = await _guard(request, db, "projects.manage")
+    if not isinstance(guard, tuple):
+        return guard
+    stage = await db.get(PaymentStage, stage_id)
+    if not stage or not stage.receipt_key:
+        return Response(status_code=404)
+    try:
+        path = asset_path(stage.receipt_key)
+    except ValueError:
+        return Response(status_code=404)
+    with path.open("rb") as stream:
+        prefix = stream.read(12)
+    extension = ".pdf" if prefix.startswith(b"%PDF-") else ".png" if prefix.startswith(b"\x89PNG") else (
+        ".webp" if prefix[8:12] == b"WEBP" else ".jpg"
+    )
+    return FileResponse(path, filename=f"payment-receipt{extension}", media_type="application/octet-stream",
+                        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store"})
 
 
 @router.post("/deliveries/{delivery_id}/review")
@@ -406,7 +559,7 @@ def _available_statuses(project: Project, admin: AdminUser):
     allowed = STATUS_TRANSITIONS.get(project.status, set())
     if admin.role == Role.REVIEWER.value:
         allowed = allowed & {"reviewing", "needs_info", "declined"}
-    return allowed
+    return allowed - {"completed"} if project.staged_payment else allowed
 
 
 async def _change_status(db: AsyncSession, project: Project, admin: AdminUser, target: str, note: str):
@@ -504,6 +657,8 @@ async def project_reply(project_id: str, request: Request, db: AsyncSession = De
     conversation = await db.get(Conversation, project.conversation_id)
     if not conversation or conversation.customer_id != project.customer_id:
         return redirect(f"/admin/projects/{project.id}", "conversation-missing")
+    if project.staged_payment and file and file.filename:
+        return redirect(f"/admin/projects/{project.id}", "stage-file-guard")
     target = f"/admin/projects/{project.id}"
     try:
         document = await _save_reply_document(db, conversation, file, text)
@@ -832,6 +987,11 @@ async def conversation_reply(conversation_id: str, request: Request, db: AsyncSe
     project = await db.scalar(select(Project).where(Project.conversation_id == conversation.id))
     if admin.role == Role.CONTRIBUTOR.value and (not project or project.assigned_admin_id != admin.id):
         return _page(request, "error.html", admin, auth, status_code=403, title="دسترسی مجاز نیست", message="این گفتگو در دسترس شما نیست.")
+    if file and file.filename and await db.scalar(select(Project.id).where(
+        Project.conversation_id == conversation.id, Project.staged_payment.is_(True),
+        Project.archived_at.is_(None), Project.status.not_in(TERMINAL),
+    ).limit(1)):
+        return redirect(f"/admin/conversations/{conversation.id}", "stage-file-guard")
     target = f"/admin/conversations/{conversation.id}"
     try:
         document = await _save_reply_document(db, conversation, file, text)

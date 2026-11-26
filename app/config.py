@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     bale_bot_token: SecretStr | None = None
     telegram_bot_username: str = ""
     bale_bot_username: str = ""
+    manual_payment_card: SecretStr | None = None
+    payment_archive_key: SecretStr | None = None
     uploads_dir: Path = Path("./data/uploads")
     max_upload_mb: int = 20
     max_archive_mb: int = 500

@@ -14,6 +14,16 @@ from sqlalchemy.exc import IntegrityError
 
 from app.bot.flow import handle_update
 from app.bot.operations import TERMINAL
+from app.bot.payment import (
+    PAYMENT_WINDOW,
+    archive_password,
+    asset_path,
+    card_number,
+    configured_for,
+    is_expired,
+    owned_stage,
+    stage_job,
+)
 from app.bot.transport import BotAdapter, ProviderError, configured_adapters
 from app.config import settings
 from app.database import SessionLocal
@@ -31,6 +41,7 @@ from app.models import (
     now_utc,
 )
 from app.permissions import has_permission
+from app.web.common import format_local
 
 logger = logging.getLogger("chitoproject.worker")
 MAX_ATTEMPTS = 12
@@ -208,6 +219,56 @@ async def _claim_outbox(limit: int = 100) -> list[int]:
         return ids
 
 
+async def _send_stage_job(db, adapter, row, conversation):
+    stage_id, _, version = row.body.partition(":")
+    pair = await owned_stage(db, conversation, stage_id, int(version), lock=False) if conversation and version.isdecimal() else None
+    if not pair:
+        raise ProviderError("stage_unavailable", permanent=True)
+    stage, _ = pair
+    payload = row.body
+    operation = row.operation
+    if operation == "stage_video" and stage.status == "preview_pending":
+        keyboard = [[{"text": "عملکرد تأیید شد", "callback_data": f"c:pa:{payload}", "style": "success"}]]
+        if stage.revision_requests < 2:
+            keyboard[0].append({"text": "درخواست اصلاح", "callback_data": f"c:pr:{payload}"})
+        else:
+            keyboard.append([{"text": "پیگیری با پشتیبانی", "callback_data": "c:home"}])
+        await adapter.send_preview_video(row.chat_id, asset_path(stage.preview_key),
+                                         f"مرحلهٔ {stage.number} از {stage.stage_count} · {stage.title}\nمبلغ: {stage.amount_toman:,} تومان", keyboard)
+        return
+    if operation == "stage_card" and stage.status == "awaiting_payment" and configured_for(conversation.platform):
+        if stage.deadline and is_expired(stage):
+            raise ProviderError("payment_expired", permanent=True)
+        card = card_number()
+        deadline = stage.deadline or now_utc() + PAYMENT_WINDOW
+        await adapter.send_message(
+            row.chat_id, f"مبلغ: {stage.amount_toman:,} تومان\nشماره کارت: {card}\nمهلت پرداخت: {format_local(deadline)} (به وقت تهران)",
+            [[{"text": "کپی شماره کارت", "copy_text": {"text": card}}],
+             [{"text": "ارسال رسید", "callback_data": f"c:pe:{payload}"}]],
+        )
+        if stage.deadline is None:
+            stage.deadline = deadline
+        return
+    if stage.status == "paid" and stage.verified_at:
+        if operation == "stage_zip":
+            await adapter.send_document(row.chat_id, asset_path(stage.archive_key), f"project-stage-{stage.number}.zip",
+                                        "application/zip", "فایل رمزدار این مرحله")
+            await stage_job(db, conversation, stage, "stage_secret")
+            return
+        if operation == "stage_secret":
+            archive = await db.scalar(select(OutboxMessage.id).where(
+                OutboxMessage.dedupe_key == f"stage_zip:{payload}", OutboxMessage.status == "sent",
+            ))
+            if archive:
+                password = archive_password(stage.id, stage.version)
+                await adapter.send_message(
+                    row.chat_id, f"رمز فایل: {password}\nفایل رو در 7-Zip باز کن، Extract رو بزن و رمز رو در کادر Password وارد کن.",
+                    [[{"text": "کپی رمز", "copy_text": {"text": password}}]],
+                )
+                return
+    raise ProviderError("stage_state_changed", permanent=True)
+
+
 async def _dispatch_outbox(row_id: int, adapters: dict[str, BotAdapter]) -> bool:
     async with SessionLocal() as session:
         row = await session.get(OutboxMessage, row_id)
@@ -241,7 +302,9 @@ async def _dispatch_outbox(row_id: int, adapters: dict[str, BotAdapter]) -> bool
                     row.status, row.lease_until = "canceled", None
                     await session.commit()
                     return False
-            if operation == "send":
+            if operation in {"stage_video", "stage_card", "stage_zip", "stage_secret"}:
+                await _send_stage_job(session, adapter, row, conversation)
+            elif operation == "send":
                 sent_id = await adapter.send_message(row.chat_id, row.body, row.keyboard)
                 message_id = sent_id
             elif operation == "document":
@@ -269,7 +332,7 @@ async def _dispatch_outbox(row_id: int, adapters: dict[str, BotAdapter]) -> bool
                     if (project.archived_at or delivery.status != "pending" or not reviewer or not reviewer.active
                             or not has_permission(reviewer.role, "projects.manage")):
                         raise ProviderError("review_not_allowed", permanent=True)
-                elif (conversation.admin_id is not None or project.customer_id != conversation.customer_id
+                elif (project.staged_payment or conversation.admin_id is not None or project.customer_id != conversation.customer_id
                       or project.conversation_id != row.conversation_id or project.status != "completed"
                       or delivery.status != "approved"):
                     raise ProviderError("unapproved_delivery", permanent=True)

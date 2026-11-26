@@ -10,6 +10,7 @@ from uuid import uuid4
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot.customer_help import DESCRIPTION_PROMPT, EXTRAS, FAQ, PAYMENT_GUIDE
 from app.bot.files import MAX_DOCUMENT_CAPTION, StoredUpload, UploadRejected, register_download
 from app.bot.operations import (
     TERMINAL,
@@ -18,6 +19,14 @@ from app.bot.operations import (
     member_chat,
     remaining_label,
     schedule_reminders,
+)
+from app.bot.payment import (
+    REVISIONS_PER_STAGE,
+    configured_for,
+    is_expired,
+    owned_stage,
+    stage_job,
+    stage_payload,
 )
 from app.bot.review import dismiss_previews, record_decision, support_context
 from app.bot.transport import BotAdapter, ProviderError
@@ -32,6 +41,7 @@ from app.models import (
     ConversationMessage,
     Customer,
     OutboxMessage,
+    PaymentStage,
     PlatformIdentity,
     Project,
     ProjectDelivery,
@@ -116,7 +126,7 @@ def _home_keyboard(staff: bool = False, can_view_all: bool = False, can_report: 
             _button("ثبت پروژه", "c:new", style="primary"),
             _button("پیگیری", "c:projects"),
         ],
-        [_button("پشتیبانی", "c:help")],
+        [_button("پشتیبانی", "c:help"), _button("شاید سؤال شما هم باشه", "c:faq")],
     ]
 
 
@@ -517,11 +527,17 @@ async def _project_view(db: AsyncSession, conversation: Conversation, update: di
     if staff and not project.archived_at:
         if project.assigned_admin_id == staff.id and remaining_label(project):
             text += f"\nمهلت انجام{remaining_label(project)}"
-        if has_permission(staff.role, "projects.manage"):
+        if not project.staged_payment and has_permission(staff.role, "projects.manage"):
             keyboard.insert(0, [_button("ارسال فایل به مشتری", f"a:file:{project.public_id}", style="primary")])
         if project.assigned_admin_id == staff.id and project.status == "in_progress":
             keyboard.insert(0, [_button("تحویل برای بررسی مدیر", f"a:submit:{project.public_id}", style="success")])
-    if not staff and project.status == "completed":
+    if not staff and project.staged_payment:
+        stages = await db.scalars(select(PaymentStage).where(
+            PaymentStage.project_id == project.id,
+        ).order_by(PaymentStage.number.desc()).limit(10))
+        for stage in stages:
+            keyboard.insert(0, [_button(f"مرحلهٔ {stage.number} · {stage.title[:26]}", f"c:ps:{stage_payload(stage)}")])
+    if not staff and not project.staged_payment and project.status == "completed":
         delivery = await db.scalar(select(ProjectDelivery).where(
             ProjectDelivery.project_id == project.id, ProjectDelivery.status == "approved",
         ).order_by(ProjectDelivery.created_at.desc()).limit(1))
@@ -794,7 +810,7 @@ async def _staff_send_file(db: AsyncSession, adapter: BotAdapter, staff: AdminUs
     query = _staff_project_scope(select(Project).where(Project.public_id == public_id), staff)
     project = await db.scalar(query.with_for_update()) if has_permission(staff.role, "projects.manage") else None
     customer = await db.get(Conversation, project.conversation_id) if project else None
-    if not project or project.archived_at or not customer or customer.customer_id != project.customer_id:
+    if not project or project.staged_payment or project.archived_at or not customer or customer.customer_id != project.customer_id:
         await _staff_menu(db, conversation, update, staff, notice="این پروژه در دسترس نیست.")
         return
     keyboard = [[_button("لغو ارسال", "a:home")]]
@@ -969,7 +985,7 @@ async def _request_review_files(db: AsyncSession, chat: Conversation, staff: Adm
 async def _request_delivery(db: AsyncSession, chat: Conversation, delivery_id: str, update: dict[str, Any]):
     delivery = await db.get(ProjectDelivery, delivery_id)
     project = await db.get(Project, delivery.project_id, with_for_update=True) if delivery else None
-    if (not project or project.customer_id != chat.customer_id or project.conversation_id != chat.id
+    if (not project or project.staged_payment or project.customer_id != chat.customer_id or project.conversation_id != chat.id
             or project.status != "completed" or delivery.status != "approved"):
         await _queue_ui(db, chat, "فایل‌های این تحویل در دسترس نیست.", _home_keyboard(), update)
         return
@@ -1051,6 +1067,111 @@ async def _send_team_message(db: AsyncSession, adapter: BotAdapter, chat: Conver
                     [[_button("بازگشت به همکاران", "a:team:0")]], update)
 
 
+async def _stage_action(db: AsyncSession, chat: Conversation, action: str, stage_id: str, version: int,
+                        update: dict[str, Any]) -> None:
+    pair = await owned_stage(db, chat, stage_id, version)
+    if not pair:
+        await _queue_ui(db, chat, "این نسخه در دسترس نیست.", [[_button("پیگیری", "c:projects")]], update)
+        return
+    stage, _ = pair
+    payload = stage_payload(stage)
+    back = [_button("بازگشت", "c:projects")]
+    if action == "ps":
+        if stage.status == "paid":
+            keyboard = [[_button("دریافت فایل و رمز", f"c:pk:{payload}", style="success")], back]
+            text = "پرداخت تأیید شده؛ فایل این مرحله آماده است."
+        elif stage.status in {"awaiting_payment", "receipt_pending"}:
+            keyboard = [[_button("ارسال رسید", f"c:pe:{payload}")], back] if stage.status == "awaiting_payment" else [back]
+            if (not stage.deadline or not is_expired(stage)) and stage.status == "awaiting_payment":
+                keyboard[0].append(_button("نمایش شماره کارت", f"c:pc:{payload}"))
+            text = "رسید در انتظار بررسیه." if stage.status == "receipt_pending" else "پرداخت این مرحله در انتظار تأییده."
+            if stage.status == "awaiting_payment" and stage.deadline and is_expired(stage):
+                text = "مهلت گذشته. اگه قبلاً واریز کردی، رسید رو بفرست؛ در غیر این صورت با پشتیبانی هماهنگ کن."
+        elif stage.status == "preview_pending":
+            await stage_job(db, chat, stage, "stage_video")
+            keyboard, text = [back], "پیش‌نمایش و دکمه‌های بررسی در همین گفتگوست."
+        else:
+            keyboard, text = [back], "تیم در حال بررسی اصلاحاته."
+        await _queue_ui(db, chat, text, keyboard, update)
+        return
+    if action == "pa" and stage.status == "preview_pending" and configured_for(chat.platform):
+        preview_sent = await db.scalar(select(OutboxMessage.id).where(
+            OutboxMessage.dedupe_key == f"stage_video:{payload}", OutboxMessage.status == "sent",
+        ))
+        if not preview_sent:
+            await _queue_ui(db, chat, "اول پیش‌نمایش این نسخه رو ببین.", [[_button("پیش‌نمایش", f"c:ps:{payload}")]], update)
+            return
+        stage.status = "awaiting_payment"
+        await stage_job(db, chat, stage, "stage_card")
+        await _queue_ui(db, chat, "تأیید شد؛ اطلاعات پرداخت می‌رسه.", [
+            [_button("ارسال رسید", f"c:pe:{payload}")], back,
+        ], update)
+        return
+    if action == "pc" and stage.status == "awaiting_payment" and (not stage.deadline or not is_expired(stage)):
+        await stage_job(db, chat, stage, "stage_card")
+        await _queue_ui(db, chat, "اطلاعات پرداخت در صف ارساله.", [[_button("ارسال رسید", f"c:pe:{payload}")], back], update)
+        return
+    if action == "pr" and stage.status == "preview_pending" and stage.revision_requests < REVISIONS_PER_STAGE:
+        chat.state = "stage_revision"
+        chat.draft_data = {"stage_id": stage_id, "stage_version": version}
+        await _queue_ui(db, chat, f"اصلاح {stage.revision_requests + 1} از ۲: همهٔ ایرادها و نتیجه‌ای که می‌خوای رو دقیق و یکجا بنویس.",
+                        [[_button("انصراف", f"c:ps:{payload}")]], update)
+        return
+    if action == "pe" and stage.status == "awaiting_payment" and stage.deadline is not None:
+        chat.state = "stage_receipt"
+        chat.draft_data = {"stage_id": stage_id, "stage_version": version}
+        detail = "اگه قبلاً پرداخت کردی، رسید همون پرداخت رو بفرست." if is_expired(stage) else "عکس یا PDF رسید رو بفرست."
+        await _queue_ui(db, chat, detail, [[_button("انصراف", "c:home")]], update)
+        return
+    if action == "pk" and stage.status == "paid" and stage.verified_at:
+        await stage_job(db, chat, stage, "stage_zip")
+        await _queue_ui(db, chat, "تحویل این مرحله در صف ارساله.", [back], update)
+        return
+    await _queue_ui(db, chat, "این گزینه دیگه در دسترس نیست. وضعیت مرحله رو بررسی کن.",
+                    [[_button("وضعیت مرحله", f"c:ps:{payload}")]], update)
+
+
+async def _stage_input(db: AsyncSession, adapter: BotAdapter, chat: Conversation,
+                       message: dict[str, Any], update: dict[str, Any]) -> None:
+    draft = chat.draft_data or {}
+    pair = await owned_stage(db, chat, draft.get("stage_id", ""), draft.get("stage_version", 0))
+    if not pair:
+        await _show_home(db, chat, update, notice="این مرحله دیگه در دسترس نیست.")
+        return
+    stage, project = pair
+    if chat.state == "stage_revision":
+        reason = str(message.get("text") or "").strip()
+        if stage.status != "preview_pending" or stage.revision_requests >= REVISIONS_PER_STAGE:
+            await _show_home(db, chat, update, notice="برای پیگیری این مرحله با پشتیبانی هماهنگ کن.")
+            return
+        if not 12 <= len(reason) <= 2000 or reason.startswith("/"):
+            await _queue_ui(db, chat, "ایرادها و نتیجه‌ای که انتظار داری رو دقیق و یکجا بنویس.",
+                            [[_button("انصراف", "c:home")]], update)
+            return
+        stage.revision_requests += 1
+        stage.status = "changes_requested"
+        db.add(ProjectEvent(project_id=project.id, actor_type="customer", actor_id=chat.customer_id,
+                            event_type="stage_revision", note=f"مرحلهٔ {stage.number}، اصلاح {stage.revision_requests} از ۲: {reason}", private=False))
+        await _show_home(db, chat, update, notice=f"درخواست اصلاح {stage.revision_requests} از ۲ برای همین مرحله ثبت شد.")
+        return
+    if stage.status != "awaiting_payment" or not stage.deadline:
+        await _show_home(db, chat, update, notice="این مرحله در وضعیت دریافت رسید نیست.")
+        return
+    try:
+        document = await _download_team_document(adapter, message, min(settings.max_upload_mb, 10) * 1024 * 1024)
+        if document.mime_type not in {"image/png", "image/jpeg", "image/webp", "application/pdf"}:
+            document.path.unlink(missing_ok=True)
+            raise UploadRejected()
+    except (ValueError, OSError, ProviderError):
+        await _queue_ui(db, chat, "رسید رو به شکل عکس یا PDF بفرست.", [[_button("انصراف", "c:home")]], update)
+        return
+    stage.receipt_key = document.stored_key
+    stage.status = "receipt_pending"
+    db.add(ProjectEvent(project_id=project.id, actor_type="customer", actor_id=chat.customer_id,
+                        event_type="stage_receipt", note=f"رسید مرحلهٔ {stage.number} برای بررسی ثبت شد.", private=True))
+    await _show_home(db, chat, update, notice="رسید ثبت شد و در انتظار بررسیه.")
+
+
 async def handle_update(db: AsyncSession, platform: str, update: dict[str, Any], adapter: BotAdapter) -> None:
     message, callback = _update_parts(update)
     if not message:
@@ -1117,6 +1238,46 @@ async def handle_update(db: AsyncSession, platform: str, update: dict[str, Any],
         if data == "c:projects" and not staff:
             await _project_list(db, conversation, update, identity.customer_id)
             return
+        if not staff and conversation.state == "home" and data == "c:faq":
+            await _queue_ui(db, conversation, "شاید سؤال شما هم باشه", [
+                *[[_button(title, f"c:faq:{key}")] for key, (title, _) in FAQ.items()],
+                [_button("منوی اصلی", "c:home")],
+            ], update)
+            return
+        if not staff and conversation.state == "home" and data.startswith("c:faq:"):
+            item = FAQ.get(data.removeprefix("c:faq:"))
+            if item:
+                answer = item[1]
+                if data == "c:faq:receipt" and not configured_for(conversation.platform):
+                    answer = "بعد از تأیید ویدئو، برای هماهنگی پرداخت و تحویل با پشتیبانی در تماس باش."
+                await _queue_ui(db, conversation, answer, [[_button("برگشت به سؤال‌ها", "c:faq")]], update)
+                return
+        if not staff and conversation.state == "review" and data == "c:payment_info":
+            guide = PAYMENT_GUIDE if configured_for(conversation.platform) else (
+                "پرداخت می‌تونه یک یا چند مرحله داشته باشه. برای هماهنگی روش پرداخت و تحویل با پشتیبانی در تماس باش."
+            )
+            await _queue_ui(db, conversation, guide, [[_button("برگشت به خلاصه", "c:review")]], update)
+            return
+        if not staff and conversation.state == "review" and data == "c:extras":
+            conversation.state = "extras"
+            await _show_extras(db, conversation, update)
+            return
+        if not staff and conversation.state == "extras" and data.startswith("c:extra:"):
+            choice = data.removeprefix("c:extra:")
+            draft = dict(conversation.draft_data or {})
+            choices = set(draft.get("extras", []))
+            if choice in EXTRAS:
+                choices.symmetric_difference_update({choice})
+                draft["extras"] = [key for key in EXTRAS if key in choices]
+                conversation.draft_data = draft
+                await _show_extras(db, conversation, update)
+                return
+            if choice in {"none", "done"}:
+                draft["extras"] = [] if choice == "none" else [key for key in EXTRAS if key in choices]
+                conversation.draft_data = draft
+                conversation.state = "review"
+                await _show_review(db, conversation, update)
+                return
         if data == "c:help" and not staff and conversation.state == "home":
             conversation.state = "support"
             conversation.draft_data = {"support_session_id": uuid4().hex}
@@ -1167,15 +1328,14 @@ async def handle_update(db: AsyncSession, platform: str, update: dict[str, Any],
             draft = dict(conversation.draft_data or {})
             draft["budget_toman"] = None
             conversation.draft_data = draft
-            conversation.state = "review"
-            await _show_review(db, conversation, update)
+            await _review_or_extras(db, conversation, update)
             return
-        if data.startswith("c:edit:") and not staff:
+        if data.startswith("c:edit:") and not staff and conversation.state == "review":
             field = data.removeprefix("c:edit:")
             mapping = {"title": "title", "description": "description", "deadline": "deadline_note", "budget": "budget_toman"}
             if field in mapping:
                 conversation.state = field
-                await _queue_ui(db, conversation, f"مقدار تازهٔ {mapping[field]} را ارسال کن.",
+                await _queue_ui(db, conversation, DESCRIPTION_PROMPT if field == "description" else f"مقدار تازهٔ {mapping[field]} را ارسال کن.",
                                 [[_button("لغو و بازگشت", "c:review")]], update)
                 return
         if data == "c:review" and not staff:
@@ -1183,6 +1343,10 @@ async def handle_update(db: AsyncSession, platform: str, update: dict[str, Any],
             await _show_review(db, conversation, update)
             return
         if data == "c:confirm" and not staff and conversation.state == "review":
+            if "extras" not in (conversation.draft_data or {}):
+                conversation.state = "extras"
+                await _show_extras(db, conversation, update)
+                return
             await _create_project(db, conversation, identity.customer_id, update, user)
             return
         if data.startswith("c:project:") and not staff:
@@ -1207,6 +1371,12 @@ async def handle_update(db: AsyncSession, platform: str, update: dict[str, Any],
                     await adapter.delete_message(chat_id, str(message["message_id"]))
                 except ProviderError:
                     pass
+            return
+        if not staff and (match := re.fullmatch(r"c:(ps|pa|pr|pc|pe|pk):([a-f0-9-]{36}):([0-9]{1,5})", data)):
+            action, stage_id, version = match.groups()
+            if conversation.state in {"stage_receipt", "stage_revision"}:
+                conversation.state, conversation.draft_data = "home", {}
+            await _stage_action(db, conversation, action, stage_id, int(version), update)
             return
         if not staff and (match := re.fullmatch(r"c:files:([a-f0-9-]{36})", data)):
             await _request_delivery(db, conversation, match[1], update)
@@ -1335,6 +1505,10 @@ async def handle_update(db: AsyncSession, platform: str, update: dict[str, Any],
                         _home_keyboard(True, has_permission(staff.role, "projects.read"), has_permission(staff.role, "reports.read")), update)
         return
 
+    if conversation.state in {"stage_revision", "stage_receipt"} and "message" in update:
+        await _stage_input(db, adapter, conversation, message, update)
+        return
+
     content = str(message.get("text") or message.get("caption") or "").strip()
     if conversation.state == "support" and content and not content.startswith("/") and not _file_from_message(message) and "message" in update:
         await _notify_support_team(db, conversation, inbound)
@@ -1351,7 +1525,7 @@ async def handle_update(db: AsyncSession, platform: str, update: dict[str, Any],
         conversation.draft_data = draft
         conversation.state = "description"
         await _queue_delete(db, conversation, inbound, update)
-        await _queue_ui(db, conversation, "کمی دربارهٔ پروژه و خروجی موردنظرت بگو.",
+        await _queue_ui(db, conversation, DESCRIPTION_PROMPT,
                         [[_button("لغو درخواست", "c:cancel", style="danger")]], update)
         return
     if conversation.state == "description" and content:
@@ -1389,9 +1563,8 @@ async def handle_update(db: AsyncSession, platform: str, update: dict[str, Any],
         draft = dict(conversation.draft_data or {})
         draft["budget_toman"] = amount
         conversation.draft_data = draft
-        conversation.state = "review"
         await _queue_delete(db, conversation, inbound, update)
-        await _show_review(db, conversation, update)
+        await _review_or_extras(db, conversation, update)
         return
     if conversation.state == "review":
         await _queue_ui(db, conversation, "پیش‌نمایش درخواست را با دکمه‌ها تأیید یا اصلاح کن.",
@@ -1401,9 +1574,26 @@ async def handle_update(db: AsyncSession, platform: str, update: dict[str, Any],
                     _home_keyboard(), update)
 
 
+async def _show_extras(db: AsyncSession, conversation: Conversation, update: dict[str, Any]) -> None:
+    choices = (conversation.draft_data or {}).get("extras", [])
+    rows = [[_button(("✓ " if key in choices else "") + title, f"c:extra:{key}")] for key, title in EXTRAS.items()]
+    rows.append([_button("ادامه", "c:extra:done", style="success"), _button("هیچ‌کدام", "c:extra:none")])
+    await _queue_ui(db, conversation, "خدمت اضافه می‌خوای؟ هزینهٔ گزینه‌های انتخابی جدا اعلام می‌شه.", rows, update)
+
+
+async def _review_or_extras(db: AsyncSession, conversation: Conversation, update: dict[str, Any]) -> None:
+    if "extras" not in (conversation.draft_data or {}):
+        conversation.state = "extras"
+        await _show_extras(db, conversation, update)
+        return
+    conversation.state = "review"
+    await _show_review(db, conversation, update)
+
+
 async def _review_keyboard() -> list[list[dict[str, str]]]:
     return [
         [_button("تأیید و ثبت درخواست", "c:confirm", style="success")],
+        [_button("روش پرداخت چطوره؟", "c:payment_info"), _button("ویرایش خدمات اضافه", "c:extras")],
         [_button("ویرایش عنوان", "c:edit:title"), _button("ویرایش توضیح", "c:edit:description")],
         [_button("ویرایش زمان", "c:edit:deadline"), _button("ویرایش بودجه", "c:edit:budget")],
         [_button("لغو درخواست", "c:cancel", style="danger")],
@@ -1414,6 +1604,7 @@ async def _show_review(db: AsyncSession, conversation: Conversation, update: dic
     draft = dict(conversation.draft_data or {})
     budget = draft.get("budget_toman")
     budget_text = f"{budget:,} تومان" if budget is not None else "اعلام نشده"
+    extras_text = "، ".join(EXTRAS[key] for key in draft.get("extras", []) if key in EXTRAS) or "هیچ‌کدام"
     text = (
         "پیش‌نمایش درخواست\n\n"
         f"رشته: {'کامپیوتر' if draft.get('subject_area') == 'computer' else 'اعلام‌نشده'}\n"
@@ -1421,7 +1612,7 @@ async def _show_review(db: AsyncSession, conversation: Conversation, update: dic
         f"توضیح: {draft.get('description', '—')[:1800]}\n\n"
         f"فایل‌ها: {len(draft.get('files') or [])}\n"
         f"زمان موردنظر: {draft.get('deadline_note') or 'اعلام نشده'}\n"
-        f"بودجه: {budget_text}"
+        f"بودجه: {budget_text}\nخدمات اضافه: {extras_text}"
     )
     await _queue_ui(db, conversation, text, await _review_keyboard(), update)
 
@@ -1439,6 +1630,8 @@ async def _create_project(db: AsyncSession, conversation: Conversation, customer
         description=str(draft["description"])[:MAX_TEXT_CHARS],
         deadline_note=str(draft.get("deadline_note", ""))[:120],
         budget_toman=draft.get("budget_toman"), status="submitted",
+        requested_extras=[key for key in EXTRAS if key in draft.get("extras", [])],
+        staged_payment=configured_for(conversation.platform),
     )
     db.add(project)
     await db.flush()

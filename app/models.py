@@ -15,6 +15,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -150,6 +151,8 @@ class Project(Base):
     description: Mapped[str] = mapped_column(Text)
     deadline_note: Mapped[str] = mapped_column(String(120), default="")
     budget_toman: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    staged_payment: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    requested_extras: Mapped[list[str]] = mapped_column(JSON, default=list, server_default="[]")
     status: Mapped[str] = mapped_column(String(32), default="submitted", index=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     work_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -179,6 +182,28 @@ class ProjectDeliveryFile(Base):
     size_bytes: Mapped[int] = mapped_column(BigInteger)
     source_platform: Mapped[str] = mapped_column(String(16), default="")
     source_file_id: Mapped[str] = mapped_column(Text, default="")
+
+
+class PaymentStage(Base):
+    __tablename__ = "payment_stages"
+    __table_args__ = (UniqueConstraint("project_id", "number", name="uq_payment_stage_number"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    delivery_id: Mapped[str] = mapped_column(ForeignKey("project_deliveries.id", ondelete="RESTRICT"))
+    number: Mapped[int] = mapped_column(Integer)
+    stage_count: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(String(140))
+    amount_toman: Mapped[int] = mapped_column(BigInteger)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    revision_requests: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(24), default="preview_pending")
+    preview_key: Mapped[str] = mapped_column(String(32))
+    archive_key: Mapped[str] = mapped_column(String(32))
+    deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    receipt_key: Mapped[str | None] = mapped_column(String(32))
+    bank_reference: Mapped[str | None] = mapped_column(String(100), unique=True)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ProjectEvent(Base):

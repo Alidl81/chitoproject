@@ -114,6 +114,8 @@ async def test_project_intake_is_private_and_archived(db_context) -> None:
     await session.commit()
     await handle_update(session, "telegram", _callback_update(9, user_id, "c:skip_budget"), adapter)
     await session.commit()
+    await handle_update(session, "telegram", _callback_update(91, user_id, "c:extra:docs"), adapter)
+    await handle_update(session, "telegram", _callback_update(92, user_id, "c:extra:done"), adapter)
     await handle_update(session, "telegram", _callback_update(10, user_id, "c:confirm"), adapter)
     await session.commit()
 
@@ -122,6 +124,7 @@ async def test_project_intake_is_private_and_archived(db_context) -> None:
     assert project is not None
     assert project.title == "طراحی وب‌سایت دانشگاهی"
     assert project.subject_area == "computer"
+    assert project.requested_extras == ["docs"]
     assert len(transcript) >= 8
     assert any("توضیح" in item.content for item in transcript)
     assert await session.scalar(select(Customer.id)) is not None
@@ -176,7 +179,7 @@ async def test_start_menu_and_registration_use_compact_inline_edit_flow(db_conte
     start = await session.scalar(select(OutboxMessage).order_by(OutboxMessage.id.desc()))
     assert start.body == "سلام مینا 👋 از کجا شروع کنیم؟"
     assert len(start.keyboard) == 2
-    assert [button["text"] for row in start.keyboard for button in row] == ["ثبت پروژه", "پیگیری", "پشتیبانی"]
+    assert [button["text"] for row in start.keyboard for button in row] == ["ثبت پروژه", "پیگیری", "پشتیبانی", "شاید سؤال شما هم باشه"]
     assert all(button.get("callback_data") != "c:clear" for row in start.keyboard for button in row)
     assert start.keyboard[0][0]["style"] == "primary"
 
