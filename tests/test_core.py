@@ -522,7 +522,7 @@ async def test_admin_conversation_page_renders_and_csrf_is_enforced(db_context, 
             assert "/start" not in detail.text
             assert "0 پیام و درخواست خوانده‌نشده" in (await client.get("/admin")).text
             stats = await client.get("/admin/stats?days=1")
-            assert stats.status_code == 200 and "1 کاربر" in stats.text and "تقویم شمسی" in stats.text
+            assert stats.status_code == 200 and "۱ کاربر" in stats.text and "تقویم شمسی" in stats.text
             from app.calendar_fa import solar_date
             from app.stats import tehran_today
 

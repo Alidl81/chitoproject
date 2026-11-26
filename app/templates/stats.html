@@ -13,21 +13,46 @@
 </table></div>
 {% endmacro %}
 {% block content %}
-<section class="panel-card">
-  <div class="panel-heading"><h2>تقویم شمسی · {{ total_users }} کاربر</h2></div>
-  <div class="pagination"><a href="?month={{ previous_month|urlencode }}&since={{ since|urlencode }}&through={{ through|urlencode }}">ماه قبل</a>
-    <bdi>{{ month_label }}</bdi><a href="?month={{ next_month|urlencode }}&since={{ since|urlencode }}&through={{ through|urlencode }}">ماه بعد</a></div>
-  <p><span class="stats-tag projects">درخواست</span> <span class="stats-tag new_users">کاربر جدید</span></p>
-  <div class="solar-calendar">
-    {% for name in ['شنبه','یکشنبه','دوشنبه','سه‌شنبه','چهارشنبه','پنجشنبه','جمعه'] %}<span class="calendar-day-label">{{ name }}</span>{% endfor %}
+{% set month_names = ['فروردین','اردیبهشت','خرداد','تیر','مرداد','شهریور','مهر','آبان','آذر','دی','بهمن','اسفند'] %}
+{% macro fa_number(value) -%}
+{{ value|string|replace('0','۰')|replace('1','۱')|replace('2','۲')|replace('3','۳')|replace('4','۴')|replace('5','۵')|replace('6','۶')|replace('7','۷')|replace('8','۸')|replace('9','۹') }}
+{%- endmacro %}
+<section class="panel-card stats-calendar-card" aria-labelledby="calendar-title">
+  <header class="calendar-month-header">
+    <h2 id="calendar-title">{{ month_names[(month_label[-2:]|int) - 1] }} {{ fa_number(month_label[:4]) }}</h2>
+    <span class="calendar-total">{{ fa_number(total_users) }} کاربر</span>
+    <nav class="calendar-month-nav" aria-label="جابه‌جایی بین ماه‌ها">
+      <a href="?month={{ previous_month|urlencode }}&since={{ since|urlencode }}&through={{ through|urlencode }}" aria-label="ماه قبل" title="ماه قبل">›</a>
+      <a href="?month={{ next_month|urlencode }}&since={{ since|urlencode }}&through={{ through|urlencode }}" aria-label="ماه بعد" title="ماه بعد">‹</a>
+    </nav>
+  </header>
+  <div class="solar-calendar" role="group" aria-label="تقویم شمسی">
+    {% for name, short in [('شنبه','ش'),('یکشنبه','ی'),('دوشنبه','د'),('سه‌شنبه','س'),('چهارشنبه','چ'),('پنجشنبه','پ'),('جمعه','ج')] %}
+      <span class="calendar-day-label{% if loop.last %} calendar-friday{% endif %}" aria-label="{{ name }}">
+        <span class="calendar-day-full">{{ name }}</span><span class="calendar-day-short" aria-hidden="true">{{ short }}</span>
+      </span>
+    {% endfor %}
     {% for _ in range(leading) %}<span aria-hidden="true"></span>{% endfor %}
     {% for row in monthly %}
-      {% if row.day <= today %}<a href="?month={{ month_label|urlencode }}&day={{ row.day|urlencode }}&since={{ since|urlencode }}&through={{ through|urlencode }}#hourly" class="calendar-cell{% if row.day == selected %} selected{% endif %}">
-      {% else %}<span class="calendar-cell muted">{% endif %}
-        <b>{{ row.day[-2:]|int }}</b><small class="stats-tag projects">{{ row.projects }}</small><small class="stats-tag new_users">{{ row.new_users }}</small>
+      {% set cell_class = 'calendar-cell' ~ (' calendar-friday' if (loop.index0 + leading) % 7 == 6 else '') ~ (' selected' if row.day == selected else '') ~ (' calendar-today' if row.day == today else '') %}
+      {% if row.day <= today %}
+      <a href="?month={{ month_label|urlencode }}&day={{ row.day|urlencode }}&since={{ since|urlencode }}&through={{ through|urlencode }}#hourly" class="{{ cell_class }}"
+         aria-label="{{ fa_number(row.day) }}: {{ fa_number(row.projects) }} درخواست، {{ fa_number(row.new_users) }} کاربر جدید{% if row.day == selected %}، روز انتخاب‌شده{% endif %}"{% if row.day == today %} aria-current="date"{% endif %}>
+      {% else %}
+      <span class="{{ cell_class }} calendar-future">
+      {% endif %}
+        <b class="calendar-date">{{ fa_number(row.day[-2:]|int) }}</b>
+        <span class="calendar-counts">
+          <small class="calendar-project-count" title="درخواست">{{ fa_number(row.projects) }}</small>
+          <small class="calendar-new-count" title="کاربر جدید">{{ fa_number(row.new_users) }}</small>
+        </span>
       {% if row.day <= today %}</a>{% else %}</span>{% endif %}
     {% endfor %}
   </div>
+  <footer class="calendar-legend">
+    <span class="calendar-project-count">درخواست</span>
+    <span class="calendar-new-count">کاربر جدید</span>
+  </footer>
 </section>
 {% if hourly %}<section class="panel-card" id="hourly"><h2>آمار ساعتی <bdi>{{ selected }}</bdi></h2>
 <p class="muted">شروع‌های یکتا در هر ساعت (جمع ساعت‌ها): {{ hourly|sum(attribute='starts') }} · درخواست: {{ hourly|sum(attribute='projects') }} · کاربر جدید: {{ hourly|sum(attribute='new_users') }}</p>
