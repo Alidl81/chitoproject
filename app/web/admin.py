@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from datetime import date, timedelta
+from datetime import timedelta
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
@@ -19,9 +19,12 @@ from app.bot.files import (
     safe_filename,
     save_document,
 )
-from app.bot.flow import document_budget
+from app.bot.flow import _review_delivery, document_budget
 from app.bot.flow import queue_customer_message as _queue_customer_message
+from app.bot.operations import TERMINAL, cancel_reminders, schedule_reminders
 from app.bot.review import dismiss_previews
+from app.calendar_fa import from_solar, parse_solar, solar_date, solar_parts
+from app.chart_png import chart_png
 from app.config import settings
 from app.database import get_session
 from app.models import (
@@ -41,6 +44,8 @@ from app.models import (
     OutboxMessage,
     PlatformIdentity,
     Project,
+    ProjectDelivery,
+    ProjectDeliveryFile,
     ProjectEvent,
     new_id,
 )
@@ -54,7 +59,7 @@ from app.security import (
     random_token,
     verify_password,
 )
-from app.stats import bot_stats, tehran_today
+from app.stats import TEHRAN, bot_stats, tehran_today
 from app.web.chat_queries import important_history, unread_messages
 from app.web.common import current_session, redirect, render, valid_session_csrf
 
@@ -140,7 +145,7 @@ async def _queue_assignee_notice(db: AsyncSession, project: Project, member: Adm
                                         admin_id=member.id, state="home", draft_data={})
             db.add(conversation)
             await db.flush()
-        body = f"پروژهٔ {project.public_id} به شما واگذار شد.\n{project.title[:180]}"
+        body = f"پروژهٔ {project.public_id} به شما واگذار شد.\n{project.title[:180]}\nمهلت: {solar_date(project.work_due_at.astimezone(TEHRAN).date())}"
         transcript = ConversationMessage(
             conversation_id=conversation.id, direction="outbound", actor_label="اعلان واگذاری",
             content=body, metadata_json={"delivery_status": "queued", "project_id": project.id},
@@ -177,7 +182,7 @@ async def dashboard(request: Request, db: AsyncSession = Depends(get_session)):
     active_projects = int(await db.scalar(select(func.count(Project.id)).where(
         Project.status.in_(["submitted", "reviewing", "needs_info", "in_progress"]), *scope)) or 0)
     total_customers = int(await db.scalar(select(func.count(func.distinct(Project.customer_id))).where(*scope)) or 0)
-    recent = list((await db.scalars(select(Project).where(*scope).order_by(Project.updated_at.desc()).limit(8))).all())
+    recent = list((await db.scalars(select(Project).where(*scope, Project.archived_at.is_(None)).order_by(Project.updated_at.desc()).limit(8))).all())
     members = int(await db.scalar(select(func.count(AdminUser.id)).where(AdminUser.active.is_(True))) or 0) if has_permission(admin.role, "team.invite") else None
     return _page(request, "dashboard.html", admin, auth, total=total, counts=counts,
                  active_projects=active_projects, total_customers=total_customers,
@@ -186,23 +191,58 @@ async def dashboard(request: Request, db: AsyncSession = Depends(get_session)):
 
 @router.get("/stats")
 async def stats_page(request: Request, db: AsyncSession = Depends(get_session),
-                     days: int = 7, since: date | None = None, through: date | None = None):
+                     days: int = 7, since: str = "", through: str = "", month: str = "", day: str = ""):
     guard = await _guard(request, db, "reports.read")
     if not isinstance(guard, tuple):
         return guard
     admin, auth = guard
     today = tehran_today()
-    through = through or today
-    if through.year < 2000:
+    try:
+        end = parse_solar(through) if through else today
+        start = parse_solar(since) if since else end - timedelta(days=max(1, min(days, 90)) - 1)
+        selected = parse_solar(day) if day else None
+        year, month_number, _ = solar_parts(parse_solar(f"{month}/01") if month else selected or today)
+        first = from_solar(year, month_number, 1)
+        next_year, next_month = (year + 1, 1) if month_number == 12 else (year, month_number + 1)
+        following = from_solar(next_year, next_month, 1)
+        if end > today or (selected and selected > today) or not 1 <= (end - start).days + 1 <= 90:
+            raise ValueError
+    except (ValueError, TypeError, OverflowError):
         return redirect("/admin/stats", "stats-invalid-range")
-    if since is None:
-        since = through - timedelta(days=max(1, min(days, 90)) - 1)
-    days = (through - since).days + 1
-    if through > today or since.year < 2000 or not 1 <= days <= 90:
+    monthly, total = await bot_stats(db, (following - first).days, following - timedelta(days=1))
+    rows, _ = await bot_stats(db, (end - start).days + 1, end)
+    hourly = (await bot_stats(db, 1, selected, hourly=True))[0] if selected else []
+    before = solar_date(first - timedelta(days=1))[:7]
+    after = solar_date(following)[:7]
+    return _page(
+        request, "stats.html", admin, auth, stats=rows, hourly=hourly, total_users=total,
+        since=solar_date(start), through=solar_date(end), selected=solar_date(selected) if selected else "",
+        monthly=monthly, leading=(first.weekday() + 2) % 7, month_label=solar_date(first)[:7],
+        previous_month=before, next_month=after, today=solar_date(today),
+        peak=max(1, *(row[k] for row in rows for k in ("starts", "projects", "new_users"))),
+        hourly_peak=max(1, *(row[k] for row in hourly for k in ("starts", "projects", "new_users"))) if hourly else 1,
+    )
+
+
+@router.get("/stats/chart")
+async def stats_chart(request: Request, db: AsyncSession = Depends(get_session),
+                      since: str = "", through: str = "", day: str = ""):
+    guard = await _guard(request, db, "reports.read")
+    if not isinstance(guard, tuple):
+        return guard
+    try:
+        end = parse_solar(day or through)
+        start = end if day else parse_solar(since)
+        days = (end - start).days + 1
+        if not 1 <= days <= 90 or end > tehran_today():
+            raise ValueError
+    except (ValueError, TypeError, OverflowError):
         return redirect("/admin/stats", "stats-invalid-range")
-    rows, total = await bot_stats(db, days, through)
-    peak = max((max(row["starts"], row["submitters"], row["new_users"]) for row in rows), default=0)
-    return _page(request, "stats.html", admin, auth, stats=rows, total_users=total, since=since, through=through, today=today, peak=max(1, peak))
+    rows, _ = await bot_stats(db, days, end, hourly=bool(day))
+    return Response(
+        chart_png(rows, hourly=bool(day)), media_type="image/png",
+        headers={"Content-Disposition": "attachment; filename=chitoproject-statistics.png", "Cache-Control": "private, no-store"},
+    )
 
 
 @router.get("/projects")
@@ -212,7 +252,7 @@ async def projects_page(request: Request, db: AsyncSession = Depends(get_session
     if not isinstance(guard, tuple):
         return guard
     admin, auth = guard
-    query = select(Project)
+    query = select(Project).where(Project.archived_at.is_(None))
     if admin.role == Role.CONTRIBUTOR.value:
         query = query.where(Project.assigned_admin_id == admin.id)
     if status in STATUS_LABELS:
@@ -226,7 +266,43 @@ async def projects_page(request: Request, db: AsyncSession = Depends(get_session
     items = list((await db.scalars(query.order_by(Project.updated_at.desc()).offset((page - 1) * 30).limit(30))).all())
     return _page(request, "projects.html", admin, auth, items=items, total=total,
                  status_labels=STATUS_LABELS, selected_status=status, search=q, page=page,
-                 page_count=page_count)
+                 page_count=page_count, can_archive=has_permission(admin.role, "projects.manage"),
+                 can_review=has_permission(admin.role, "projects.review"))
+
+
+@router.post("/projects/actions")
+async def project_actions(request: Request, db: AsyncSession = Depends(get_session),
+                          project_ids: list[str] = Form([]), target: str = Form(""),
+                          action: str = Form("status")):
+    guard = await _guard(request, db, "projects.manage" if action == "archive" else "projects.review", post=True)
+    if not isinstance(guard, tuple):
+        return guard
+    admin, _ = guard
+    ids = set(project_ids)
+    if not ids or len(ids) > 30 or action not in {"archive", "status"}:
+        return redirect("/admin/projects", "project-selection-invalid")
+    rows = list(await db.scalars(select(Project).where(
+        Project.id.in_(ids), Project.archived_at.is_(None),
+    ).order_by(Project.id).with_for_update()))
+    if len(rows) != len(ids) or (action == "status" and any(
+        target not in _available_statuses(row, admin) for row in rows
+    )):
+        return redirect("/admin/projects", "invalid-transition")
+    for row in rows:
+        if action == "archive":
+            row.archived_at = now_utc()
+            await cancel_reminders(db, row.id)
+            await dismiss_previews(db, f"new-project:{row.id}")
+            deliveries = await db.scalars(select(ProjectDelivery.id).where(
+                ProjectDelivery.project_id == row.id, ProjectDelivery.status == "pending",
+            ))
+            for delivery_id in deliveries:
+                await dismiss_previews(db, f"delivery-review:{delivery_id}")
+            _audit(db, admin, "project.archived", "project", row.id, {})
+        else:
+            await _change_status(db, row, admin, target, "")
+    await db.commit()
+    return redirect("/admin/projects", "projects-archived" if action == "archive" else "status-saved")
 
 
 @router.get("/projects/{project_id}")
@@ -255,10 +331,54 @@ async def project_detail(project_id: str, request: Request, db: AsyncSession = D
         ConversationFile.conversation_id == project.conversation_id,
     ))).all())
     members = list((await db.scalars(select(AdminUser).where(AdminUser.active.is_(True)).order_by(AdminUser.display_name, AdminUser.username))).all()) if has_permission(admin.role, "projects.manage") else []
+    members = [member for member in members if has_permission(member.role, "projects.execute")
+               or has_permission(member.role, "projects.manage")]
+    deliveries = list(await db.scalars(select(ProjectDelivery).where(
+        ProjectDelivery.project_id == project.id, ProjectDelivery.status.in_(("pending", "approved", "rejected")),
+    ).order_by(ProjectDelivery.created_at.desc()).limit(20)))
+    delivery_files = list(await db.scalars(select(ProjectDeliveryFile).where(
+        ProjectDeliveryFile.delivery_id.in_([item.id for item in deliveries]),
+    ).order_by(ProjectDeliveryFile.original_name)))
     return _page(request, "project_detail.html", admin, auth, project=project, customer=customer,
-                 conversation=conversation, transcript=transcript, transcript_files=transcript_files, events=events, attachments=attachments,
+                 deliveries=deliveries, delivery_files=delivery_files, conversation=conversation, transcript=transcript, transcript_files=transcript_files, events=events, attachments=attachments,
                  members=members, status_labels=STATUS_LABELS, can_manage=has_permission(admin.role, "projects.manage"),
                  can_reply=has_permission(admin.role, "messages.reply"), can_review=has_permission(admin.role, "projects.review"))
+
+
+@router.post("/deliveries/{delivery_id}/review")
+async def review_project_delivery(delivery_id: str, request: Request, db: AsyncSession = Depends(get_session),
+                                  decision: str = Form("")):
+    guard = await _guard(request, db, "projects.manage", post=True)
+    if not isinstance(guard, tuple):
+        return guard
+    admin, _ = guard
+    delivery = await db.get(ProjectDelivery, delivery_id)
+    if not delivery or decision not in {"approve", "reject"}:
+        return redirect("/admin/projects", "delivery-unavailable")
+    if not await _review_delivery(db, admin, delivery_id, decision == "approve"):
+        return redirect(f"/admin/projects/{delivery.project_id}", "delivery-unavailable")
+    await db.commit()
+    return redirect(f"/admin/projects/{delivery.project_id}", "delivery-reviewed")
+
+
+@router.get("/delivery-files/{file_id}")
+async def download_project_delivery(file_id: str, request: Request, db: AsyncSession = Depends(get_session)):
+    guard = await _guard(request, db, "projects.read")
+    if not isinstance(guard, tuple):
+        return guard
+    admin, _ = guard
+    file = await db.get(ProjectDeliveryFile, file_id)
+    delivery = await db.get(ProjectDelivery, file.delivery_id) if file else None
+    project = await _project_scope(db, admin, delivery.project_id) if delivery else None
+    if (not file or not project or not delivery or delivery.status == "draft"
+            or not re.fullmatch(r"[a-f0-9]{32}", file.stored_key)):
+        return Response(status_code=404)
+    root = settings.uploads_dir.resolve()
+    path = (root / file.stored_key).resolve()
+    if path.parent != root or not path.is_file():
+        return Response(status_code=404)
+    return FileResponse(path, media_type=file.mime_type, filename=safe_filename(file.original_name),
+                        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store"})
 
 
 @router.post("/projects/{project_id}/status")
@@ -273,11 +393,21 @@ async def project_status(project_id: str, request: Request, db: AsyncSession = D
     project = await db.get(Project, project_id, with_for_update=True)
     if not project:
         return _page(request, "error.html", admin, auth, status_code=404, title="پروژه پیدا نشد", message="این پروژه در دسترس نیست.")
+    if project.archived_at or target not in _available_statuses(project, admin):
+        return redirect(f"/admin/projects/{project.id}", "invalid-transition")
+    await _change_status(db, project, admin, target, note)
+    await db.commit()
+    return redirect(f"/admin/projects/{project.id}", "status-saved")
+
+
+def _available_statuses(project: Project, admin: AdminUser):
     allowed = STATUS_TRANSITIONS.get(project.status, set())
     if admin.role == Role.REVIEWER.value:
-        allowed &= {"reviewing", "needs_info", "declined"}
-    if target not in allowed:
-        return redirect(f"/admin/projects/{project.id}", "invalid-transition")
+        allowed = allowed & {"reviewing", "needs_info", "declined"}
+    return allowed
+
+
+async def _change_status(db: AsyncSession, project: Project, admin: AdminUser, target: str, note: str):
     old = project.status
     project.status = target
     project.updated_at = now_utc()
@@ -291,28 +421,47 @@ async def project_status(project_id: str, request: Request, db: AsyncSession = D
         await _queue_customer_message(db, conversation, admin, text, f"status:{project.id}:{old}:{target}:{int(now_utc().timestamp())}")
     if old == "submitted":
         await dismiss_previews(db, f"new-project:{project.id}")
+    if target in TERMINAL:
+        await cancel_reminders(db, project.id)
+        deliveries = list(await db.scalars(select(ProjectDelivery).where(
+            ProjectDelivery.project_id == project.id, ProjectDelivery.status.in_(("draft", "pending")),
+        )))
+        for delivery in deliveries:
+            await dismiss_previews(db, f"delivery-review:{delivery.id}")
+            delivery.status = "superseded"
     _audit(db, admin, "project.status", "project", project.id, {"from": old, "to": target})
-    await db.commit()
-    return redirect(f"/admin/projects/{project.id}", "status-saved")
 
 
 @router.post("/projects/{project_id}/assign")
 async def project_assign(project_id: str, request: Request, db: AsyncSession = Depends(get_session),
-                         admin_id: int = Form(0)):
+                         admin_id: int = Form(0), work_days: int = Form(0)):
     guard = await _guard(request, db, "projects.manage", post=True)
     if not isinstance(guard, tuple):
         return guard
     admin, auth = guard
-    project = await _project_scope(db, admin, project_id)
+    project = await db.get(Project, project_id, with_for_update=True)
     member = await db.get(AdminUser, admin_id)
-    if not project or not member or not member.active:
+    if (not project or project.archived_at or project.status in TERMINAL or not 1 <= work_days <= 365
+            or not member or not member.active
+            or not (has_permission(member.role, "projects.execute") or has_permission(member.role, "projects.manage"))):
         return redirect("/admin/projects", "invalid-assignee")
+    if project.assigned_admin_id != member.id:
+        old_deliveries = list(await db.scalars(select(ProjectDelivery).where(
+            ProjectDelivery.project_id == project.id, ProjectDelivery.status.in_(("pending", "draft")),
+        )))
+        for delivery in old_deliveries:
+            await dismiss_previews(db, f"delivery-review:{delivery.id}")
+            delivery.status = "superseded"
     project.assigned_admin_id = member.id
+    project.work_due_at = now_utc() + timedelta(days=work_days)
+    if project.status in {"submitted", "reviewing", "needs_info"}:
+        await _change_status(db, project, admin, "in_progress", "")
     project.updated_at = now_utc()
     db.add(ProjectEvent(project_id=project.id, actor_type="admin", actor_id=str(admin.id), event_type="assigned",
                         note=f"واگذار شد به {member.display_name or member.username}", private=True))
     _audit(db, admin, "project.assign", "project", project.id, {"admin_id": member.id})
     await _queue_assignee_notice(db, project, member)
+    await schedule_reminders(db, project, member, "telegram")
     await db.commit()
     return redirect(f"/admin/projects/{project.id}", "assigned")
 
@@ -343,6 +492,9 @@ async def project_reply(project_id: str, request: Request, db: AsyncSession = De
     if not isinstance(guard, tuple):
         return guard
     admin, auth = guard
+    if file and file.filename and not has_permission(admin.role, "projects.manage"):
+        return _page(request, "error.html", admin, auth, status_code=403,
+                     title="دسترسی مجاز نیست", message="ارسال مستقیم فایل به مشتری با مدیر پروژه است.")
     project = await _project_scope(db, admin, project_id)
     text = body.strip()
     if not project or (not text and not (file and file.filename)):
@@ -656,6 +808,7 @@ async def conversation_detail(conversation_id: str, request: Request, db: AsyncS
                  conversation=conversation, customer=customer, identity=identity, remote_removal=remote_removal,
                  project=project, messages=messages, files=files,
                  page=page, page_count=page_count, total_messages=total_messages, logs=logs, search=search,
+                 can_send_files=has_permission(admin.role, "projects.manage"),
                  can_delete=admin.role == Role.OWNER.value,
                  can_reply=has_permission(admin.role, "messages.reply"))
 
@@ -667,6 +820,9 @@ async def conversation_reply(conversation_id: str, request: Request, db: AsyncSe
     if not isinstance(guard, tuple):
         return guard
     admin, auth = guard
+    if file and file.filename and not has_permission(admin.role, "projects.manage"):
+        return _page(request, "error.html", admin, auth, status_code=403,
+                     title="دسترسی مجاز نیست", message="ارسال مستقیم فایل به مشتری با مدیر پروژه است.")
     conversation = await db.get(Conversation, conversation_id)
     text = body.strip()
     if not conversation or not conversation.customer_id or (not text and not (file and file.filename)):
@@ -833,6 +989,10 @@ async def create_bot_link(target_id: int, request: Request, db: AsyncSession = D
     username = settings.telegram_bot_username if platform == "telegram" else settings.bale_bot_username if platform == "bale" else ""
     if not target or not target.active or not username:
         return redirect("/admin/team", "bot-link-unavailable")
+    if await db.scalar(select(PlatformIdentity.id).where(
+        PlatformIdentity.admin_id == target.id, PlatformIdentity.platform == platform,
+    ).limit(1)):
+        return redirect("/admin/team", "member-already-linked")
     token = random_token(24)
     db.add(BotLinkChallenge(token_digest=digest_token(token), admin_id=target.id, platform=platform,
                             expires_at=expires_in(hours=1)))
@@ -845,6 +1005,24 @@ async def create_bot_link(target_id: int, request: Request, db: AsyncSession = D
                  notice_text="لینک اتصال یک‌بارمصرف است و یک ساعت اعتبار دارد.",
                  telegram_bot_available=bool(settings.telegram_bot_username and settings.telegram_bot_token),
                  bale_bot_available=bool(settings.bale_bot_username and settings.bale_bot_token))
+
+
+@router.post("/team/{target_id}/role")
+async def change_member_role(target_id: int, request: Request, db: AsyncSession = Depends(get_session),
+                             role: str = Form("")):
+    guard = await _guard(request, db, "*", post=True)
+    if not isinstance(guard, tuple):
+        return guard
+    admin, _ = guard
+    member = await db.get(AdminUser, target_id, with_for_update=True)
+    if not member or member.role == Role.OWNER.value or role not in {item.value for item in Role if item != Role.OWNER}:
+        return redirect("/admin/team", "cannot-manage-member")
+    if member.role != role:
+        _audit(db, admin, "team.role_changed", "admin", str(member.id), {"from": member.role, "to": role})
+        member.role = role
+        member.session_version += 1
+    await db.commit()
+    return redirect("/admin/team", "member-role-updated")
 
 
 @router.post("/team/{target_id}/deactivate")
@@ -863,6 +1041,12 @@ async def change_member(target_id: int, request: Request, db: AsyncSession = Dep
     if action == "reactivate":
         if not target.active:
             target.active = True
+            assignments = list(await db.scalars(select(Project).where(
+                Project.assigned_admin_id == target.id, Project.archived_at.is_(None),
+                Project.status.not_in(TERMINAL), Project.work_due_at > now_utc(),
+            )))
+            for project in assignments:
+                await schedule_reminders(db, project, target, "telegram")
             _audit(db, admin, "team.reactivated", "admin", str(target.id), {})
         await db.commit()
         return redirect("/admin/team", "member-reactivated")

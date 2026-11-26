@@ -522,7 +522,16 @@ async def test_admin_conversation_page_renders_and_csrf_is_enforced(db_context, 
             assert "/start" not in detail.text
             assert "0 پیام و درخواست خوانده‌نشده" in (await client.get("/admin")).text
             stats = await client.get("/admin/stats?days=1")
-            assert stats.status_code == 200 and "1 کاربر ثبت‌شده" in stats.text
+            assert stats.status_code == 200 and "1 کاربر" in stats.text and "تقویم شمسی" in stats.text
+            from app.calendar_fa import solar_date
+            from app.stats import tehran_today
+
+            day = solar_date(tehran_today())
+            hourly = await client.get("/admin/stats", params={"day": day})
+            assert hourly.status_code == 200 and "آمار ساعتی" in hourly.text and "23:00" in hourly.text
+            chart = await client.get("/admin/stats/chart", params={"day": day})
+            assert chart.status_code == 200 and chart.content.startswith(b"\x89PNG\r\n\x1a\n")
+
             assert response.headers["x-frame-options"] == "DENY"
 
             rejected = await client.post("/admin/team/invites", data={"role": "reviewer"})
@@ -746,21 +755,24 @@ def test_upload_validation_and_private_random_name(tmp_path: Path, monkeypatch) 
 
 
 @pytest.mark.asyncio
-async def test_staff_document_requires_project_assignment_and_targets_customer(db_context, monkeypatch) -> None:
+async def test_staff_delivery_requires_approval_and_reaches_customer(db_context, monkeypatch) -> None:
     from app.bot import worker
+    from app.models import ProjectDelivery
 
     session, maker = db_context
     staff = AdminUser(username="sender", password_hash="unused", role=Role.CONTRIBUTOR.value)
     customer = Customer(display_name="Customer")
-    session.add_all([staff, customer])
+    owner = AdminUser(username="delivery-owner", password_hash="unused", role=Role.OWNER.value)
+    session.add_all([staff, customer, owner])
     await session.flush()
-    conversation = Conversation(platform="bale", chat_id="customer-chat", customer_id=customer.id)
+    conversation = Conversation(platform="bale", chat_id="92", customer_id=customer.id)
     session.add_all([conversation, PlatformIdentity(
         platform="telegram", provider_user_id="91", chat_id="91", admin_id=staff.id,
-    )])
+    ), PlatformIdentity(platform="telegram", provider_user_id="93", chat_id="93", admin_id=owner.id),
+       PlatformIdentity(platform="bale", provider_user_id="92", chat_id="92", customer_id=customer.id)])
     await session.flush()
     project = Project(public_id="CP-FILE", customer_id=customer.id, conversation_id=conversation.id,
-                      title="IoT", description="Delivery test")
+                      title="IoT", description="Delivery test", status="in_progress")
     session.add(project)
     await session.flush()
 
@@ -789,15 +801,26 @@ async def test_staff_document_requires_project_assignment_and_targets_customer(d
     assert await session.scalar(select(OutboxMessage).where(OutboxMessage.operation == "document")) is None
     project.assigned_admin_id = staff.id
     await session.flush()
-    await handle_update(session, "telegram", _callback_update(203, 91, "a:file:CP-FILE"), adapter)
+    await handle_update(session, "telegram", _callback_update(203, 91, "a:submit:CP-FILE"), adapter)
     await handle_update(session, "telegram", document_update(204), adapter)
-    job = await session.scalar(select(OutboxMessage).where(OutboxMessage.operation == "document"))
-    assert (job.platform, job.chat_id) == ("bale", "customer-chat")
+    delivery = await session.scalar(select(ProjectDelivery))
+    assert delivery.status == "draft"
+    await handle_update(session, "telegram", _callback_update(205, 91, f"a:ds:{delivery.id}"), adapter)
+    assert delivery.status == "pending"
+    await handle_update(session, "bale", _callback_update(206, 92, f"c:files:{delivery.id}"), adapter)
+    assert await session.scalar(select(OutboxMessage.id).where(OutboxMessage.operation == "final_file")) is None
+    await handle_update(session, "telegram", _callback_update(207, 93, f"a:da:{delivery.id}"), adapter)
+    assert project.status == "completed" and delivery.status == "approved"
+    await handle_update(session, "bale", _callback_update(208, 92, f"c:files:{delivery.id}"), adapter)
+    await handle_update(session, "bale", _callback_update(209, 92, f"c:files:{delivery.id}"), adapter)
+    job = await session.scalar(select(OutboxMessage).where(OutboxMessage.operation == "final_file"))
+    assert (job.platform, job.chat_id) == ("bale", "92")
+    assert len(list(await session.scalars(select(OutboxMessage).where(OutboxMessage.operation == "final_file")))) == 1
     job.status = "processing"
     await session.commit()
     monkeypatch.setattr(worker, "SessionLocal", maker)
     assert await worker._dispatch_outbox(job.id, {"bale": adapter})
-    assert adapter.sent == [("customer-chat", "تحویل پروژه")]
+    assert adapter.sent == [("92", "فایل پروژهٔ CP-FILE")]
     session.expire_all()
     delivered = await session.scalar(select(ConversationMessage).where(ConversationMessage.provider_message_id == "1234"))
     assert delivered.metadata_json["delivery_status"] == "sent"
@@ -849,3 +872,43 @@ async def test_staff_review_accepts_once_rejects_with_reason_and_dismisses_previ
     assert preview.status == "canceled"
     reply = await db.scalar(select(OutboxMessage).where(OutboxMessage.dedupe_key.startswith("review-result:s:")))
     assert reply.chat_id == "811" and "Please send your project number" in reply.body
+
+
+@pytest.mark.asyncio
+async def test_assignment_schedules_two_reminders_and_team_contact_can_reply(db_context) -> None:
+    from app.bot.operations import cancel_reminders, schedule_reminders
+
+    db, _ = db_context
+    dev = AdminUser(username="delivery-dev", role=Role.CONTRIBUTOR.value, password_hash="unused")
+    support = AdminUser(username="delivery-support", role=Role.SUPPORT.value, password_hash="unused")
+    customer = Customer(display_name="Customer")
+    db.add_all([dev, support, customer])
+    await db.flush()
+    client = Conversation(platform="telegram", chat_id="90", customer_id=customer.id)
+    db.add_all([
+        client,
+        PlatformIdentity(platform="telegram", provider_user_id="850", chat_id="850", admin_id=dev.id),
+        PlatformIdentity(platform="bale", provider_user_id="851", chat_id="851", admin_id=support.id),
+    ])
+    await db.flush()
+    deadline = now_utc() + timedelta(days=5)
+    project = Project(public_id="CP-DUE", customer_id=customer.id, conversation_id=client.id,
+                      title="مهلت تحویل", description="Test deadline", work_due_at=deadline,
+                      assigned_admin_id=dev.id, status="in_progress")
+    db.add(project)
+    await db.flush()
+    await schedule_reminders(db, project, dev, "telegram")
+    reminders = list(await db.scalars(select(OutboxMessage).where(
+        OutboxMessage.dedupe_key.startswith(f"deadline:{project.id}:"),
+    ).order_by(OutboxMessage.next_attempt_at)))
+    assert [r.next_attempt_at.replace(tzinfo=deadline.tzinfo) for r in reminders] == [
+        deadline - timedelta(days=2), deadline - timedelta(days=1),
+    ]
+    await cancel_reminders(db, project.id)
+    assert all(r.status == "canceled" for r in reminders)
+    adapter = FakeAdapter()
+    await handle_update(db, "telegram", _callback_update(971, 850, f"a:peer:{support.id}"), adapter)
+    await handle_update(db, "telegram", _message_update(972, 850, "Internal project question"), adapter)
+    forwarded = await db.scalar(select(OutboxMessage).where(OutboxMessage.dedupe_key == "team:telegram:972"))
+    assert (forwarded.platform, forwarded.chat_id) == ("bale", "851")
+    assert forwarded.keyboard[0][0]["callback_data"] == f"a:peer:{dev.id}"

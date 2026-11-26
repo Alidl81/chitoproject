@@ -12,6 +12,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.calendar_fa import solar_date
 from app.config import settings
 from app.models import AdminSession, AdminUser
 from app.permissions import has_permission, role_label
@@ -27,7 +28,8 @@ templates = Environment(
 
 def format_local(value: datetime) -> str:
     aware = value.replace(tzinfo=UTC) if value.tzinfo is None else value
-    return aware.astimezone(ZoneInfo("Asia/Tehran")).strftime("%Y-%m-%d · %H:%M")
+    local = aware.astimezone(ZoneInfo("Asia/Tehran"))
+    return f"{solar_date(local.date())} · {local:%H:%M}"
 
 
 def notice_label(value: str) -> str:
@@ -52,6 +54,10 @@ def notice_label(value: str) -> str:
         "conversation-hidden": "گفتگو فقط در فهرست شما به بایگانی رفت.",
         "conversation-delete-queued": "گفتگو بایگانی شد و حذف پیام‌های قابل پیگیری در صف قرار گرفت.",
         "conversation-no-deletable": "گفتگو بایگانی شد. پیام تازه‌ای برای درخواست حذف پیدا نشد.",
+        "delivery-unavailable": "این تحویل آمادهٔ بررسی نیست.",
+        "delivery-reviewed": "نتیجهٔ بررسی فایل‌های تحویل ثبت شد.",
+        "projects-archived": "پروژه‌های انتخاب‌شده از فهرست حذف شدند.",
+        "project-selection-invalid": "دست‌کم یک پروژه انتخاب کنید.",
         "stats-invalid-range": "بازه‌ای معتبر تا امروز و حداکثر ۹۰ روز انتخاب کنید.",
         "broadcast-invalid": "متن یا پیام‌رسان انتخاب‌شده معتبر نیست.",
         "broadcast-empty": "برای پیام‌رسان انتخاب‌شده گیرنده‌ای پیدا نشد.",
@@ -62,6 +68,8 @@ def notice_label(value: str) -> str:
         "transcript-deleted": "آرشیو گفتگو حذف شد؛ رویداد حذف در گزارش باقی ماند.",
         "bot-link-unavailable": "لینک پیام‌رسان در دسترس نیست. نام کاربری ربات را بررسی کنید.",
         "cannot-manage-member": "این حساب قابل حذف یا تغییر وضعیت نیست.",
+        "member-already-linked": "این حساب قبلاً در این پیام‌رسان وصل شده است.",
+        "member-role-updated": "سمت همکار ذخیره شد. اتصال ربات برقرار است.",
         "member-reactivated": "حساب همکار دوباره فعال شد.",
         "member-deleted": "حساب همکار حذف شد و نام کاربری آزاد است.",
         "member-deactivated": "دسترسی همکار لغو شد و نشست‌های او باطل شدند.",

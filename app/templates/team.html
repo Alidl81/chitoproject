@@ -11,6 +11,15 @@
       <details class="mini-menu">
         <summary>مدیریت عضو</summary>
         <div class="mini-menu-body">
+          <form method="post" action="/admin/team/{{ member.id }}/role">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <label>سمت <select name="role">
+            {% for code in ('manager', 'reviewer', 'contributor', 'support') %}
+              <option value="{{ code }}" {% if member.role == code %}selected{% endif %}>{{ role_labels[code] }}</option>
+            {% endfor %}
+            </select></label>
+            <button type="submit">ذخیرهٔ سمت</button>
+          </form>
           {% if member.active %}
           <form method="post" action="/admin/team/{{ member.id }}/deactivate" data-confirm="دسترسی این همکار غیرفعال شود؟">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

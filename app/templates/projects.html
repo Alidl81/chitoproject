@@ -9,8 +9,22 @@
     <select name="status"><option value="">همهٔ وضعیت‌ها</option>{% for code, label in status_labels.items() %}<option value="{{ code }}" {% if selected_status == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
     <button class="button secondary" type="submit">اعمال فیلتر</button>
   </form>
-  {% if items %}<div class="table-wrap"><table><thead><tr><th>درخواست</th><th>شناسه</th><th>وضعیت</th><th>آخرین تغییر</th><th></th></tr></thead><tbody>
-  {% for project in items %}<tr><td><a class="table-title" href="/admin/projects/{{ project.id }}">{{ project.title }}</a><small class="table-sub">{{ project.description[:100] }}{% if project.description|length > 100 %}…{% endif %}</small></td><td><span class="mono">{{ project.public_id }}</span></td><td><span class="status-pill status-{{ project.status }}">{{ status_labels.get(project.status, project.status) }}</span></td><td>{{ project.updated_at.strftime('%Y-%m-%d %H:%M') }}</td><td><a class="icon-link" href="/admin/projects/{{ project.id }}" aria-label="باز کردن پروژه">←</a></td></tr>{% endfor %}
+  {% if items %}
+  {% if can_review or can_archive %}
+  <form method="post" action="/admin/projects/actions" class="filter-bar" id="project-actions">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {% if can_review %}
+    <label>وضعیت تازه <select name="target"><option value="">انتخاب وضعیت</option>
+      {% for code,label in status_labels.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}
+    </select></label>
+    <button type="submit" name="action" value="status" class="button primary">تغییر وضعیت انتخاب‌شده‌ها</button>
+    {% endif %}
+    {% if can_archive %}<button type="submit" name="action" value="archive" class="button danger" data-action-confirm="پروژه‌های انتخاب‌شده از فهرست کنار گذاشته شوند؟">حذف از فهرست</button>{% endif %}
+  </form>
+  {% endif %}
+  <div class="table-wrap"><table><thead><tr>{% if can_review or can_archive %}<th>انتخاب</th>{% endif %}<th>درخواست</th><th>شناسه</th><th>وضعیت</th><th>آخرین تغییر</th><th></th></tr></thead><tbody>
+  {% for project in items %}<tr>
+  {% if can_review or can_archive %}<td><input type="checkbox" form="project-actions" name="project_ids" value="{{ project.id }}" aria-label="{{ project.title }}"></td>{% endif %}<td><a class="table-title" href="/admin/projects/{{ project.id }}">{{ project.title }}</a><small class="table-sub">{{ project.description[:100] }}{% if project.description|length > 100 %}…{% endif %}</small></td><td><span class="mono">{{ project.public_id }}</span></td><td><span class="status-pill status-{{ project.status }}">{{ status_labels.get(project.status, project.status) }}</span></td><td>{{ format_local(project.updated_at) }}</td><td><a class="icon-link" href="/admin/projects/{{ project.id }}" aria-label="باز کردن پروژه">←</a></td></tr>{% endfor %}
   </tbody></table></div>{% else %}<div class="empty-state"><span>⌕</span><b>موردی پیدا نشد</b><p>فیلترها را تغییر دهید یا بعداً دوباره سر بزنید.</p></div>{% endif %}
   {% if total > 30 %}<div class="pagination"><span>صفحهٔ {{ page }}</span>{% if page > 1 %}<a class="button small secondary" href="?page={{ page - 1 }}&q={{ search }}&status={{ selected_status }}">قبلی</a>{% endif %}{% if total > page * 30 %}<a class="button small secondary" href="?page={{ page + 1 }}&q={{ search }}&status={{ selected_status }}">بعدی</a>{% endif %}</div>{% endif %}
 </section>

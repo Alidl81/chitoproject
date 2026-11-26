@@ -11,8 +11,17 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.files import MAX_DOCUMENT_CAPTION, StoredUpload, UploadRejected, register_download
+from app.bot.operations import (
+    TERMINAL,
+    approve_delivery,
+    enqueue_text,
+    member_chat,
+    remaining_label,
+    schedule_reminders,
+)
 from app.bot.review import dismiss_previews, record_decision, support_context
 from app.bot.transport import BotAdapter, ProviderError
+from app.chart_png import chart_png
 from app.config import settings
 from app.models import (
     AdminUser,
@@ -25,6 +34,8 @@ from app.models import (
     OutboxMessage,
     PlatformIdentity,
     Project,
+    ProjectDelivery,
+    ProjectDeliveryFile,
     ProjectEvent,
 )
 from app.permissions import Role, has_permission
@@ -95,6 +106,7 @@ def _home_keyboard(staff: bool = False, can_view_all: bool = False, can_report: 
             rows = [[_button("پروژه‌های من", "a:projects"), _button("صف بررسی", "a:queue")]]
         else:
             rows = [[_button("پروژه‌های من", "a:projects")]]
+        rows.append([_button("گفت‌وگوی تیم", "a:team:0")])
         if can_report:
             rows.append([_button("گزارش آماری", "a:stats:1", style="primary")])
         rows.append([_button("ورود به پنل مدیریت", url=f"{settings.public_base_url.rstrip('/')}/admin")])
@@ -338,7 +350,7 @@ async def _decide_preview(db: AsyncSession, staff: AdminUser, kind: str, object_
     source = None
     if kind == "p" and has_permission(staff.role, "projects.review"):
         project = await db.get(Project, object_id, with_for_update=True)
-        if not project or project.status != "submitted":
+        if not project or project.archived_at or project.status != "submitted":
             return False
         conversation_id = project.conversation_id
         key = f"new-project:{project.id}"
@@ -436,6 +448,12 @@ async def _finish_admin_link(db: AsyncSession, identity: PlatformIdentity, platf
     challenge.used_at = now_utc()
     conversation.admin_id = admin.id
     await _archive_event(db, conversation, _label(user), "حساب همکار به پیام‌رسان متصل شد.", update)
+    projects = list(await db.scalars(select(Project).where(
+        Project.assigned_admin_id == admin.id, Project.archived_at.is_(None),
+        Project.status.not_in(TERMINAL), Project.work_due_at > now_utc(),
+    )))
+    for project in projects:
+        await schedule_reminders(db, project, admin, platform)
     return True
 
 
@@ -448,7 +466,7 @@ async def _staff_menu(db: AsyncSession, conversation: Conversation, update: dict
 
 async def _project_list(db: AsyncSession, conversation: Conversation, update: dict[str, Any], customer_id: str,
                         *, staff: AdminUser | None = None, all_projects: bool = False) -> None:
-    query = select(Project)
+    query = select(Project).where(Project.archived_at.is_(None))
     if staff is None:
         query = query.where(Project.customer_id == customer_id)
     elif staff.role == Role.CONTRIBUTOR.value:
@@ -460,7 +478,7 @@ async def _project_list(db: AsyncSession, conversation: Conversation, update: di
         text = "درخواستی برای پیگیری پیدا نشد." if staff is None else "پروژه‌ای برای نمایش در دسترس نیست."
         await _queue_ui(db, conversation, text, [[_button("بازگشت به منو", "c:home" if staff is None else "a:home")]], update)
         return
-    keyboard = [[_button(f"{p.public_id} · {p.title[:22]}",
+    keyboard = [[_button((p.title[:38] + remaining_label(p)) if staff else f"{p.public_id} · {p.title[:22]}",
                          f"{'a' if staff else 'c'}:project:{p.public_id}")] for p in rows]
     keyboard.append([_button("بازگشت به منو", "a:home" if staff else "c:home")])
     text = "یکی از درخواست‌ها را انتخاب کن:" if staff is None else "پروژه‌ای را برای مشاهدهٔ وضعیت انتخاب کنید:"
@@ -482,7 +500,7 @@ async def _project_view(db: AsyncSession, conversation: Conversation, update: di
     if customer_id:
         query = query.where(Project.customer_id == customer_id)
     if staff:
-        query = _staff_project_scope(query, staff)
+        query = _staff_project_scope(query.where(Project.archived_at.is_(None)), staff)
     project = await db.scalar(query)
     if not project:
         await _queue_ui(db, conversation, "این درخواست در دسترس نیست.",
@@ -496,8 +514,19 @@ async def _project_view(db: AsyncSession, conversation: Conversation, update: di
     )
     keyboard = [[_button("بازگشت به فهرست", "a:projects" if staff else "c:projects")],
                 [_button("منوی اصلی", "a:home" if staff else "c:home")]]
-    if staff and has_permission(staff.role, "messages.reply"):
-        keyboard.insert(0, [_button("ارسال فایل به مشتری", f"a:file:{project.public_id}", style="primary")])
+    if staff and not project.archived_at:
+        if project.assigned_admin_id == staff.id and remaining_label(project):
+            text += f"\nمهلت انجام{remaining_label(project)}"
+        if has_permission(staff.role, "projects.manage"):
+            keyboard.insert(0, [_button("ارسال فایل به مشتری", f"a:file:{project.public_id}", style="primary")])
+        if project.assigned_admin_id == staff.id and project.status == "in_progress":
+            keyboard.insert(0, [_button("تحویل برای بررسی مدیر", f"a:submit:{project.public_id}", style="success")])
+    if not staff and project.status == "completed":
+        delivery = await db.scalar(select(ProjectDelivery).where(
+            ProjectDelivery.project_id == project.id, ProjectDelivery.status == "approved",
+        ).order_by(ProjectDelivery.created_at.desc()).limit(1))
+        if delivery:
+            keyboard.insert(0, [_button("دریافت فایل‌های پروژه", f"c:files:{delivery.id}", style="success")])
     await _queue_ui(db, conversation, text, keyboard, update)
 
 
@@ -654,7 +683,8 @@ async def document_budget(db: AsyncSession, conversation: Conversation) -> int:
 
 
 async def queue_customer_message(db: AsyncSession, conversation: Conversation, admin: AdminUser,
-                                  body: str, key: str, *, document: StoredUpload | None = None) -> ConversationMessage:
+                                  body: str, key: str, *, document: StoredUpload | None = None,
+                                  keyboard=None) -> ConversationMessage:
     conversation.updated_at = now_utc()
     session_field = ConversationMessage.metadata_json["support_session_id"].as_string()
     support_session_id = await db.scalar(
@@ -687,7 +717,7 @@ async def queue_customer_message(db: AsyncSession, conversation: Conversation, a
     db.add(OutboxMessage(
         dedupe_key=key[:160], platform=conversation.platform, chat_id=conversation.chat_id,
         conversation_id=conversation.id, transcript_message_id=message.id, operation="document" if document else "send",
-        body=caption, keyboard=None,
+        body=caption, keyboard=keyboard,
     ))
     return message
 
@@ -762,9 +792,9 @@ async def _staff_send_file(db: AsyncSession, adapter: BotAdapter, staff: AdminUs
                            conversation: Conversation, message: dict[str, Any], update: dict[str, Any]) -> None:
     public_id = (conversation.draft_data or {}).get("delivery_project")
     query = _staff_project_scope(select(Project).where(Project.public_id == public_id), staff)
-    project = await db.scalar(query.with_for_update()) if has_permission(staff.role, "messages.reply") else None
+    project = await db.scalar(query.with_for_update()) if has_permission(staff.role, "projects.manage") else None
     customer = await db.get(Conversation, project.conversation_id) if project else None
-    if not project or not customer or customer.customer_id != project.customer_id:
+    if not project or project.archived_at or not customer or customer.customer_id != project.customer_id:
         await _staff_menu(db, conversation, update, staff, notice="این پروژه در دسترس نیست.")
         return
     keyboard = [[_button("لغو ارسال", "a:home")]]
@@ -792,6 +822,233 @@ async def _staff_send_file(db: AsyncSession, adapter: BotAdapter, staff: AdminUs
     db.add(ProjectEvent(project_id=project.id, actor_type="admin", actor_id=str(staff.id),
                         event_type="reply", note=document.original_name, private=False))
     await _staff_menu(db, conversation, update, staff, notice="فایل در صف ارسال به مشتری قرار گرفت.")
+
+
+async def _download_team_document(adapter: BotAdapter, message: dict[str, Any], limit: int) -> StoredUpload:
+    item = _file_from_message(message)
+    if not item or limit <= 0 or item[3] > limit:
+        raise UploadRejected("فایل معتبر نیست یا از سقف حجم بیشتر است.")
+    file_id, name, mime, _, _ = item
+    path, _, _, _ = await adapter.download_to(file_id, settings.uploads_dir, limit)
+    try:
+        return register_download(path, name, mime)
+    except (ValueError, OSError):
+        path.unlink(missing_ok=True)
+        raise
+
+
+async def _delivery_project(db: AsyncSession, staff: AdminUser, public_id: str):
+    if not (has_permission(staff.role, "projects.execute") or has_permission(staff.role, "projects.manage")):
+        return None
+    return await db.scalar(select(Project).where(
+        Project.public_id == public_id, Project.assigned_admin_id == staff.id,
+        Project.status == "in_progress", Project.archived_at.is_(None),
+    ).with_for_update())
+
+
+async def _capture_delivery(db: AsyncSession, adapter: BotAdapter, staff: AdminUser, chat: Conversation,
+                            message: dict[str, Any], update: dict[str, Any]) -> None:
+    project = await _delivery_project(db, staff, (chat.draft_data or {}).get("delivery_project", ""))
+    if not project:
+        await _staff_menu(db, chat, update, staff, notice="این پروژه دیگر برای تحویل در دسترس نیست.")
+        return
+    delivery = await db.scalar(select(ProjectDelivery).where(
+        ProjectDelivery.project_id == project.id, ProjectDelivery.submitted_by == staff.id,
+        ProjectDelivery.status.in_(("draft", "pending")),
+    ).order_by(ProjectDelivery.created_at.desc()).limit(1))
+    if delivery and delivery.status == "pending":
+        await _staff_menu(db, chat, update, staff, notice="تحویل قبلی منتظر بررسی مدیر است.")
+        return
+    if not delivery:
+        delivery = ProjectDelivery(project_id=project.id, submitted_by=staff.id)
+        db.add(delivery)
+        await db.flush()
+    files = list(await db.scalars(select(ProjectDeliveryFile).where(ProjectDeliveryFile.delivery_id == delivery.id)))
+    keyboard = [[_button("ارسال برای بررسی", f"a:ds:{delivery.id}", style="success")],
+                [_button("بازگشت", "a:home")]]
+    limit = min(settings.max_upload_mb, 20) * 1024 * 1024
+    limit = min(limit, settings.max_archive_mb * 1024 * 1024 - sum(f.size_bytes for f in files))
+    try:
+        if len(files) >= 10:
+            raise UploadRejected()
+        stored = await _download_team_document(adapter, message, limit)
+    except (ValueError, OSError, ProviderError):
+        await _queue_ui(db, chat, "فایل قابل دریافت نیست یا سقف تحویل پر شده است.", keyboard, update)
+        return
+    item = _file_from_message(message)
+    db.add(ProjectDeliveryFile(
+        delivery_id=delivery.id, stored_key=stored.stored_key, original_name=stored.original_name,
+        mime_type=stored.mime_type, size_bytes=stored.size_bytes, source_platform=chat.platform,
+        source_file_id=item[0] if item and item[4] == "document" else "",
+    ))
+    await _queue_ui(db, chat, f"{len(files) + 1} فایل آماده است. فایل دیگری بفرستید یا تحویل را برای بررسی ثبت کنید.", keyboard, update)
+
+
+async def _submit_delivery(db: AsyncSession, staff: AdminUser, delivery_id: str) -> bool:
+    delivery = await db.get(ProjectDelivery, delivery_id)
+    if (not delivery or delivery.submitted_by != staff.id
+            or not (has_permission(staff.role, "projects.execute") or has_permission(staff.role, "projects.manage"))):
+        return False
+    project = await db.get(Project, delivery.project_id, with_for_update=True)
+    await db.refresh(delivery)
+    if (not project or project.assigned_admin_id != staff.id or project.archived_at
+            or project.status != "in_progress" or delivery.status != "draft"):
+        return False
+    files = list(await db.scalars(select(ProjectDeliveryFile).where(ProjectDeliveryFile.delivery_id == delivery.id)))
+    if not files:
+        return False
+    delivery.status = "pending"
+    managers = await db.scalars(select(AdminUser).where(AdminUser.active.is_(True)).order_by(AdminUser.id))
+    for manager in managers:
+        if not has_permission(manager.role, "projects.manage"):
+            continue
+        target = await member_chat(db, manager, "telegram")
+        if target:
+            await enqueue_text(
+                db, target, f"تحویل آمادهٔ بررسی · {project.title}\n" + "\n".join(f.original_name for f in files),
+                f"delivery-review:{delivery.id}:{manager.id}", keyboard=[
+                    [_button("دریافت فایل برای بررسی", f"a:df:{delivery.id}", style="primary"),
+                     _button("پنل", url=f"{settings.public_base_url.rstrip('/')}/admin/projects/{project.id}")],
+                    [_button("تأیید تحویل", f"a:da:{delivery.id}", style="success"),
+                     _button("برگرداندن برای اصلاح", f"a:dr:{delivery.id}", style="danger")],
+                ],
+            )
+    return True
+
+
+async def _review_delivery(db: AsyncSession, staff: AdminUser, delivery_id: str, accept: bool) -> bool:
+    if not has_permission(staff.role, "projects.manage"):
+        return False
+    if accept:
+        if not await approve_delivery(db, staff, delivery_id):
+            return False
+    else:
+        delivery = await db.get(ProjectDelivery, delivery_id)
+        if not delivery:
+            return False
+        project = await db.get(Project, delivery.project_id, with_for_update=True)
+        await db.refresh(delivery)
+        if not project or project.archived_at or delivery.status != "pending":
+            return False
+        delivery.status = "rejected"
+        member = await db.get(AdminUser, delivery.submitted_by) if delivery.submitted_by else None
+        if member and member.active and (chat := await member_chat(db, member, "telegram")):
+            await enqueue_text(db, chat, f"تحویل «{project.title}» برای اصلاح برگشت.",
+                               f"delivery-returned:{delivery.id}")
+    await dismiss_previews(db, f"delivery-review:{delivery_id}")
+    record_decision(db, staff.id, "delivery", delivery_id, accept, "")
+    return True
+
+
+async def _request_review_files(db: AsyncSession, chat: Conversation, staff: AdminUser,
+                               delivery_id: str, update: dict[str, Any]):
+    delivery = await db.get(ProjectDelivery, delivery_id)
+    project = await db.get(Project, delivery.project_id) if delivery else None
+    if not project or project.archived_at or delivery.status != "pending" or not has_permission(staff.role, "projects.manage"):
+        await _staff_menu(db, chat, update, staff, notice="این فایل‌ها دیگر آمادهٔ بررسی نیستند.")
+        return
+    files = await db.scalars(select(ProjectDeliveryFile).where(ProjectDeliveryFile.delivery_id == delivery_id))
+    await _queue_ui(db, chat, "فایل‌ها برای بررسی در صف قرار گرفتند.", [[
+        _button("تأیید تحویل", f"a:da:{delivery_id}", style="success"),
+        _button("برگرداندن", f"a:dr:{delivery_id}", style="danger"),
+    ], [_button("منوی اصلی", "a:home")]], update)
+    for file in files:
+        entry = ConversationMessage(
+            conversation_id=chat.id, direction="outbound", actor_label="تحویل پروژه", content=file.original_name,
+            message_kind="document", metadata_json={"delivery_status": "queued", "delivery_file_id": file.id},
+        )
+        db.add(entry)
+        await db.flush()
+        db.add(OutboxMessage(
+            dedupe_key=f"review-file:{chat.platform}:{update['update_id']}:{file.id}",
+            platform=chat.platform, chat_id=chat.chat_id, conversation_id=chat.id,
+            transcript_message_id=entry.id, operation="review_file", body=f"نسخهٔ بررسی · {project.title}",
+        ))
+
+
+async def _request_delivery(db: AsyncSession, chat: Conversation, delivery_id: str, update: dict[str, Any]):
+    delivery = await db.get(ProjectDelivery, delivery_id)
+    project = await db.get(Project, delivery.project_id, with_for_update=True) if delivery else None
+    if (not project or project.customer_id != chat.customer_id or project.conversation_id != chat.id
+            or project.status != "completed" or delivery.status != "approved"):
+        await _queue_ui(db, chat, "فایل‌های این تحویل در دسترس نیست.", _home_keyboard(), update)
+        return
+    files = list(await db.scalars(select(ProjectDeliveryFile).where(
+        ProjectDeliveryFile.delivery_id == delivery_id,
+    ).order_by(ProjectDeliveryFile.id)))
+    jobs = {row.dedupe_key: row for row in await db.scalars(select(OutboxMessage).where(
+        OutboxMessage.dedupe_key.startswith(f"final-file:{delivery_id}:"),
+    ))}
+    to_send = [(file, f"final-file:{delivery_id}:{file.id}") for file in files]
+    waiting = any(key not in jobs or jobs[key].status in {"pending", "processing", "failed", "canceled"}
+                  for _, key in to_send)
+    text = "فایل‌ها در صف ارسال‌اند. برای فایل بزرگ ممکن است کمی طول بکشد." if waiting else "فایل‌های این پروژه قبلاً در همین گفتگو ارسال شده‌اند."
+    if not files:
+        text = "فایلی برای این تحویل پیدا نشد."
+    await _queue_ui(db, chat, text, [
+        [_button("بررسی وضعیت ارسال", f"c:files:{delivery_id}")], [_button("منوی اصلی", "c:home")],
+    ], update)
+    for file, key in to_send:
+        job = jobs.get(key)
+        if job and job.transcript_message_id:
+            if job.status in {"failed", "canceled"}:
+                job.status, job.attempts, job.next_attempt_at = "pending", 0, now_utc()
+            continue
+        if job:
+            await db.delete(job)
+            await db.flush()
+        entry = ConversationMessage(
+            conversation_id=chat.id, direction="outbound", actor_label="تحویل پروژه", content=file.original_name,
+            message_kind="document", metadata_json={"delivery_status": "queued", "delivery_file_id": file.id},
+        )
+        db.add(entry)
+        await db.flush()
+        db.add(OutboxMessage(dedupe_key=key, platform=chat.platform, chat_id=chat.chat_id,
+                             conversation_id=chat.id, transcript_message_id=entry.id, operation="final_file",
+                             body=f"فایل پروژهٔ {project.public_id}"))
+
+
+async def _team_menu(db: AsyncSession, chat: Conversation, staff: AdminUser, page: int, update: dict[str, Any]):
+    chat.state = "home"
+    chat.draft_data = {}
+    linked = select(PlatformIdentity.id).where(PlatformIdentity.admin_id == AdminUser.id).exists()
+    members = list(await db.scalars(select(AdminUser).where(
+        AdminUser.active.is_(True), AdminUser.id != staff.id, linked,
+    ).order_by(AdminUser.display_name, AdminUser.username).offset(page * 12).limit(13)))
+    buttons = [[_button(member.display_name or member.username, f"a:peer:{member.id}")] for member in members[:12]]
+    if page:
+        buttons.append([_button("قبلی", f"a:team:{page - 1}")])
+    if len(members) > 12:
+        buttons.append([_button("بعدی", f"a:team:{page + 1}")])
+    buttons.append([_button("منوی اصلی", "a:home")])
+    await _queue_ui(db, chat, "برای پیام یا ارسال فایل، همکار را انتخاب کنید.", buttons, update)
+
+
+async def _send_team_message(db: AsyncSession, adapter: BotAdapter, chat: Conversation, staff: AdminUser,
+                             message: dict[str, Any], update: dict[str, Any]):
+    member = await db.get(AdminUser, (chat.draft_data or {}).get("peer_id"))
+    target = await member_chat(db, member, chat.platform) if member and member.active and member.id != staff.id else None
+    if not target:
+        await _staff_menu(db, chat, update, staff, notice="این همکار دیگر در دسترس نیست.")
+        return
+    text = str(message.get("text") or message.get("caption") or "").strip()
+    keyboard = [[_button("پاسخ به همکار", f"a:peer:{staff.id}", style="primary")]]
+    limit = await document_budget(db, target) if _file_from_message(message) else 0
+    document = None
+    if _file_from_message(message):
+        try:
+            document = await _download_team_document(adapter, message, limit)
+        except (ValueError, OSError, ProviderError):
+            await _queue_ui(db, chat, "دریافت فایل موفق نبود یا سقف حجم پر شده است.",
+                            [[_button("بازگشت به همکاران", "a:team:0")]], update)
+            return
+    if not text and not document:
+        return
+    name = staff.display_name or staff.username
+    await queue_customer_message(db, target, staff, f"پیام تیمی از {name}\n{text}".rstrip(),
+                                 f"team:{chat.platform}:{update['update_id']}", document=document, keyboard=keyboard)
+    await _queue_ui(db, chat, f"پیام برای {member.display_name or member.username} در صف است. می‌توانید پیام یا فایل دیگری بفرستید.",
+                    [[_button("بازگشت به همکاران", "a:team:0")]], update)
 
 
 async def handle_update(db: AsyncSession, platform: str, update: dict[str, Any], adapter: BotAdapter) -> None:
@@ -931,17 +1188,64 @@ async def handle_update(db: AsyncSession, platform: str, update: dict[str, Any],
         if data.startswith("c:project:") and not staff:
             await _project_view(db, conversation, update, data.removeprefix("c:project:"), identity.customer_id)
             return
-        if staff and data in {"a:stats:1", "a:stats:7", "a:stats:30"} and has_permission(staff.role, "reports.read"):
-            days = int(data.rsplit(":", 1)[1])
+        if staff and data in {"a:stats:1", "a:stats:7", "a:stats:30", "a:stats:h"} and has_permission(staff.role, "reports.read"):
+            hourly = data.endswith(":h")
+            days = 1 if hourly else int(data.rsplit(":", 1)[1])
             conversation.state = "home"
             conversation.draft_data = {}
-            rows, total = await bot_stats(db, days)
-            lines = [f"گزارش آماری · کاربران ثبت‌شده: {total}", "تاریخ | شروع‌کننده / ثبت‌کننده پروژه / کاربر جدید"]
-            lines.extend(f"{row['day']} · {row['starts']} / {row['submitters']} / {row['new_users']}" for row in rows)
-            await _queue_ui(db, conversation, "\n".join(lines), [[
-                _button("امروز", "a:stats:1", style="primary"),
-                _button("۷ روز", "a:stats:7"), _button("۳۰ روز", "a:stats:30"),
-            ], [_button("منوی اصلی", "a:home")]], update)
+            rows, total = await bot_stats(db, days, hourly=hourly)
+            x_axis = "محور افقی: ساعت تهران" if hourly else "محور افقی: روز ماه شمسی"
+            caption = (f"آمار {rows[0]['day']} تا {rows[-1]['day']}\nکل کاربران: {total}\n"
+                       f"آبی: شروع‌کننده · سبز: درخواست · نارنجی: کاربر جدید\n{x_axis}")
+            await adapter.send_chart(chat_id, chart_png(rows, hourly=hourly), caption, [
+                [_button("ساعتی امروز", "a:stats:h", style="primary"), _button("امروز", "a:stats:1")],
+                [_button("۷ روز", "a:stats:7"), _button("۳۰ روز", "a:stats:30")],
+                [_button("منوی اصلی", "a:home")],
+            ])
+            if message.get("photo") and message.get("message_id"):
+                try:
+                    await adapter.delete_message(chat_id, str(message["message_id"]))
+                except ProviderError:
+                    pass
+            return
+        if not staff and (match := re.fullmatch(r"c:files:([a-f0-9-]{36})", data)):
+            await _request_delivery(db, conversation, match[1], update)
+            return
+        if staff and (match := re.fullmatch(r"a:team:([0-9]{1,3})", data)):
+            await _team_menu(db, conversation, staff, int(match[1]), update)
+            return
+        if staff and (match := re.fullmatch(r"a:peer:([0-9]{1,10})", data)):
+            member = await db.get(AdminUser, int(match[1]))
+            if member and member.active and member.id != staff.id and await member_chat(db, member, platform):
+                conversation.state = "team_chat"
+                conversation.draft_data = {"peer_id": member.id}
+                await _queue_ui(db, conversation, f"برای {member.display_name or member.username} پیام یا فایل بفرستید.",
+                                [[_button("بازگشت به همکاران", "a:team:0")]], update)
+                return
+        if staff and data.startswith("a:submit:"):
+            project = await _delivery_project(db, staff, data.removeprefix("a:submit:"))
+            if project:
+                conversation.state = "delivery_upload"
+                conversation.draft_data = {"delivery_project": project.public_id}
+                draft = await db.scalar(select(ProjectDelivery).where(
+                    ProjectDelivery.project_id == project.id, ProjectDelivery.submitted_by == staff.id,
+                    ProjectDelivery.status == "draft",
+                ).limit(1))
+                buttons = [[_button("ارسال برای بررسی", f"a:ds:{draft.id}", style="success")]] if draft else []
+                await _queue_ui(db, conversation, "فایل‌های تحویل را یکی‌یکی بفرستید.",
+                                buttons + [[_button("بازگشت", "a:home")]], update)
+                return
+        if staff and (match := re.fullmatch(r"a:df:([a-f0-9-]{36})", data)):
+            await _request_review_files(db, conversation, staff, match[1], update)
+            return
+        if staff and (match := re.fullmatch(r"a:d([sar]):([a-f0-9-]{36})", data)):
+            action, delivery_id = match.groups()
+            ok = await _submit_delivery(db, staff, delivery_id) if action == "s" else await _review_delivery(db, staff, delivery_id, action == "a")
+            if action == "s":
+                notice = "فایل‌ها برای مدیران در صف بررسی قرار گرفت." if ok else "این تحویل آمادهٔ ارسال نیست."
+            else:
+                notice = ("تحویل تأیید شد." if action == "a" else "برای اصلاح برگشت.") if ok else "این تحویل دیگر قابل بررسی نیست."
+            await _staff_menu(db, conversation, update, staff, notice=notice)
             return
         if staff and (match := re.fullmatch(r"a:([ps])([ar]):([a-f0-9-]{36})", data)):
             kind, action, object_id = match.groups()
@@ -967,7 +1271,7 @@ async def handle_update(db: AsyncSession, platform: str, update: dict[str, Any],
         if staff and data == "a:queue" and has_permission(staff.role, "projects.read"):
             await _project_list(db, conversation, update, identity.customer_id or "", staff=staff, all_projects=True)
             return
-        if staff and data.startswith("a:file:") and has_permission(staff.role, "messages.reply"):
+        if staff and data.startswith("a:file:") and has_permission(staff.role, "projects.manage"):
             public_id = data.removeprefix("a:file:")
             project = await db.scalar(_staff_project_scope(select(Project).where(Project.public_id == public_id), staff))
             if project:
@@ -1016,6 +1320,12 @@ async def handle_update(db: AsyncSession, platform: str, update: dict[str, Any],
         decided = await _decide_preview(db, staff, draft.get("review_kind", ""), draft.get("review_id", ""), False, reason)
         await _staff_menu(db, conversation, update, staff,
                           notice="رد شد و دلیل برای مشتری در صف ارسال قرار گرفت." if decided else "این مورد قبلاً بررسی شده یا در دسترس نیست.")
+        return
+    if staff and conversation.state == "delivery_upload" and "message" in update:
+        await _capture_delivery(db, adapter, staff, conversation, message, update)
+        return
+    if staff and conversation.state == "team_chat" and "message" in update:
+        await _send_team_message(db, adapter, conversation, staff, message, update)
         return
     if staff and conversation.state == "staff_file" and "message" in update:
         await _staff_send_file(db, adapter, staff, conversation, message, update)

@@ -1,29 +1,48 @@
 {% extends "base.html" %}
 {% block title %}آمار ربات{% endblock %}
 {% block heading %}آمار ربات{% endblock %}
+{% macro bars(rows, peak, hourly=false) %}
+<div class="table-wrap"><table class="stats-bars">
+  <thead><tr><th>{{ 'ساعت' if hourly else 'روز' }}</th><th>شروع‌کننده</th><th>درخواست</th><th>کاربر جدید</th></tr></thead>
+  <tbody>{% for row in rows %}<tr>
+    <th scope="row"><bdi>{{ '%02d:00'|format(row.hour) if hourly else row.day }}</bdi></th>
+    {% for metric, label in [('starts','شروع‌کننده'),('projects','درخواست'),('new_users','کاربر جدید')] %}
+    <td><progress max="{{ peak }}" value="{{ row[metric] }}" class="stats-bar {{ metric }}" aria-label="{{ label }}"></progress> {{ row[metric] }}</td>
+    {% endfor %}
+  </tr>{% endfor %}</tbody>
+</table></div>
+{% endmacro %}
 {% block content %}
 <section class="panel-card">
-  <div class="panel-heading"><h2>{{ total_users }} کاربر ثبت‌شده</h2></div>
-  <form action="/admin/stats" method="get" class="filter-bar">
-    <label for="since">از</label>
-    <input id="since" name="since" type="date" min="2000-01-01" max="{{ today }}" value="{{ since }}" required>
-    <label for="through">تا</label>
-    <input id="through" name="through" type="date" min="2000-01-01" max="{{ today }}" value="{{ through }}" required>
+  <div class="panel-heading"><h2>تقویم شمسی · {{ total_users }} کاربر</h2></div>
+  <div class="pagination"><a href="?month={{ previous_month|urlencode }}&since={{ since|urlencode }}&through={{ through|urlencode }}">ماه قبل</a>
+    <bdi>{{ month_label }}</bdi><a href="?month={{ next_month|urlencode }}&since={{ since|urlencode }}&through={{ through|urlencode }}">ماه بعد</a></div>
+  <p><span class="stats-tag projects">درخواست</span> <span class="stats-tag new_users">کاربر جدید</span></p>
+  <div class="solar-calendar">
+    {% for name in ['شنبه','یکشنبه','دوشنبه','سه‌شنبه','چهارشنبه','پنجشنبه','جمعه'] %}<span class="calendar-day-label">{{ name }}</span>{% endfor %}
+    {% for _ in range(leading) %}<span aria-hidden="true"></span>{% endfor %}
+    {% for row in monthly %}
+      {% if row.day <= today %}<a href="?month={{ month_label|urlencode }}&day={{ row.day|urlencode }}&since={{ since|urlencode }}&through={{ through|urlencode }}#hourly" class="calendar-cell{% if row.day == selected %} selected{% endif %}">
+      {% else %}<span class="calendar-cell muted">{% endif %}
+        <b>{{ row.day[-2:]|int }}</b><small class="stats-tag projects">{{ row.projects }}</small><small class="stats-tag new_users">{{ row.new_users }}</small>
+      {% if row.day <= today %}</a>{% else %}</span>{% endif %}
+    {% endfor %}
+  </div>
+</section>
+{% if hourly %}<section class="panel-card" id="hourly"><h2>آمار ساعتی <bdi>{{ selected }}</bdi></h2>
+<p class="muted">شروع‌های یکتا در هر ساعت (جمع ساعت‌ها): {{ hourly|sum(attribute='starts') }} · درخواست: {{ hourly|sum(attribute='projects') }} · کاربر جدید: {{ hourly|sum(attribute='new_users') }}</p>
+<a class="button small secondary" href="/admin/stats/chart?day={{ selected|urlencode }}">دانلود نمودار ساعتی</a>
+{{ bars(hourly, hourly_peak, true) }}</section>{% endif %}
+<section class="panel-card">
+  <h2>نمودار بازهٔ انتخابی</h2>
+  <form method="get" class="filter-bar">
+    <input type="hidden" name="month" value="{{ month_label }}">
+    <label>از <input dir="ltr" name="since" value="{{ since }}" placeholder="1405/09/01" maxlength="10" required></label>
+    <label>تا <input dir="ltr" name="through" value="{{ through }}" placeholder="1405/09/30" maxlength="10" required></label>
     <button class="button secondary">نمایش</button>
   </form>
-  <p class="muted">بر اساس روز تهران. هر کاربر در هر شاخصِ روزانه یک‌بار شمرده می‌شود. آمار شروع بر پایهٔ لاگ موجود است.</p>
-  <div class="table-wrap">
-    <table>
-      <thead><tr><th>روز</th><th>شروع‌کننده</th><th>ثبت‌کنندهٔ پروژه</th><th>کاربر جدید</th></tr></thead>
-      <tbody>
-        {% for row in stats %}<tr>
-          <th scope="row"><bdi>{{ row.day }}</bdi></th>
-          {% for metric, label in [('starts', 'شروع‌کننده'), ('submitters', 'ثبت‌کنندهٔ پروژه'), ('new_users', 'کاربر جدید')] %}
-          <td><progress class="status-progress progress-{{ loop.index }}" max="{{ peak }}" value="{{ row[metric] }}" aria-label="{{ label }} در {{ row.day }}"></progress> {{ row[metric] }}</td>
-          {% endfor %}
-        </tr>{% endfor %}
-      </tbody>
-    </table>
-  </div>
+  <p class="muted">تاریخ شمسی به شکل سال/ماه/روز، تا ۹۰ روز. ساعت‌ها به وقت تهران‌اند.</p>
+  <a class="button small secondary" href="/admin/stats/chart?since={{ since|urlencode }}&through={{ through|urlencode }}">دانلود نمودار بازه</a>
+  {{ bars(stats, peak) }}
 </section>
 {% endblock %}

@@ -301,3 +301,14 @@ tbody tr:last-child td { border-bottom: 0; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
 }
+
+.solar-calendar { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: .3rem; }
+.calendar-day-label { font-size: clamp(.52rem, 1.4vw, .8rem); text-align: center; }
+.calendar-cell { display: flex; align-items: center; flex-wrap: wrap; justify-content: center; gap: .2rem; padding: .3rem .1rem; border: 1px solid currentColor; border-radius: .45rem; min-height: 2.3rem; }
+.calendar-cell.selected { outline: 2px solid #438ef5; }
+.stats-tag { border-radius: .3rem; padding-inline: .26rem; font-size: .75rem; font-weight: bold; }
+.stats-tag.projects { color: #073a2a; background: #4cca95; }
+.stats-tag.new_users { color: #402100; background: #ffb056; }
+.stats-bar { width: min(68%, 10rem); accent-color: #438ef5; }
+.stats-bar.projects { accent-color: #4cca95; }
+.stats-bar.new_users { accent-color: #ffb056; }

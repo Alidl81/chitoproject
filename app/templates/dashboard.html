@@ -21,7 +21,7 @@
   <section class="panel-card">
     <div class="panel-heading"><div><p class="eyebrow">آخرین به‌روزرسانی‌ها</p><h2>پروژه‌های تازه</h2></div><a class="text-link" href="/admin/projects">مشاهده همه ←</a></div>
     {% if recent %}<div class="project-list compact">
-      {% for project in recent %}<a class="project-row" href="/admin/projects/{{ project.id }}"><span class="project-avatar">{{ project.title[:1] }}</span><span class="project-main"><b>{{ project.title }}</b><small>{{ project.public_id }} · {{ project.updated_at.strftime('%Y-%m-%d %H:%M') }}</small></span><span class="status-pill status-{{ project.status }}">{{ status_labels.get(project.status, project.status) }}</span><span class="row-chevron">←</span></a>{% endfor %}
+      {% for project in recent %}<a class="project-row" href="/admin/projects/{{ project.id }}"><span class="project-avatar">{{ project.title[:1] }}</span><span class="project-main"><b>{{ project.title }}</b><small>{{ project.public_id }} · {{ format_local(project.updated_at) }}</small></span><span class="status-pill status-{{ project.status }}">{{ status_labels.get(project.status, project.status) }}</span><span class="row-chevron">←</span></a>{% endfor %}
     </div>{% else %}<div class="empty-state"><span>✧</span><b>هنوز درخواستی ثبت نشده</b><p>درخواست‌های تازه پس از ثبت اینجا دیده می‌شوند.</p></div>{% endif %}
   </section>
   <section class="panel-card status-card">

@@ -50,3 +50,9 @@
     if (form && !window.confirm(form.dataset.confirm)) event.preventDefault();
   });
 })();
+
+
+document.addEventListener("submit", (event) => {
+  const question = event.submitter?.dataset.actionConfirm;
+  if (question && !window.confirm(question)) event.preventDefault();
+});

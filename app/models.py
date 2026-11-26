@@ -151,9 +151,34 @@ class Project(Base):
     deadline_note: Mapped[str] = mapped_column(String(120), default="")
     budget_toman: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="submitted", index=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    work_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     assigned_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id", ondelete="SET NULL"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
+
+
+class ProjectDelivery(Base):
+    __tablename__ = "project_deliveries"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    submitted_by: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id", ondelete="SET NULL"))
+    status: Mapped[str] = mapped_column(String(16), default="draft")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+class ProjectDeliveryFile(Base):
+    __tablename__ = "project_delivery_files"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    delivery_id: Mapped[str] = mapped_column(ForeignKey("project_deliveries.id", ondelete="CASCADE"), index=True)
+    stored_key: Mapped[str] = mapped_column(String(64), unique=True)
+    original_name: Mapped[str] = mapped_column(String(200))
+    mime_type: Mapped[str] = mapped_column(String(120))
+    size_bytes: Mapped[int] = mapped_column(BigInteger)
+    source_platform: Mapped[str] = mapped_column(String(16), default="")
+    source_file_id: Mapped[str] = mapped_column(Text, default="")
 
 
 class ProjectEvent(Base):

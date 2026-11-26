@@ -13,18 +13,24 @@ from sqlalchemy import update as sql_update
 from sqlalchemy.exc import IntegrityError
 
 from app.bot.flow import handle_update
+from app.bot.operations import TERMINAL
 from app.bot.transport import BotAdapter, ProviderError, configured_adapters
 from app.config import settings
 from app.database import SessionLocal
 from app.models import (
+    AdminUser,
     Conversation,
     ConversationFile,
     ConversationMessage,
     IncomingUpdate,
     OutboxMessage,
     PollerLease,
+    Project,
+    ProjectDelivery,
+    ProjectDeliveryFile,
     now_utc,
 )
+from app.permissions import has_permission
 
 logger = logging.getLogger("chitoproject.worker")
 MAX_ATTEMPTS = 12
@@ -227,6 +233,14 @@ async def _dispatch_outbox(row_id: int, adapters: dict[str, BotAdapter]) -> bool
                 else:
                     operation = "send"
                     message_id = None
+            if row.dedupe_key.startswith("deadline:"):
+                project = await session.get(Project, row.dedupe_key.split(":")[1])
+                member = await session.get(AdminUser, conversation.admin_id) if conversation and conversation.admin_id else None
+                if (not project or project.archived_at or project.status in TERMINAL
+                        or not member or not member.active or member.id != project.assigned_admin_id):
+                    row.status, row.lease_until = "canceled", None
+                    await session.commit()
+                    return False
             if operation == "send":
                 sent_id = await adapter.send_message(row.chat_id, row.body, row.keyboard)
                 message_id = sent_id
@@ -241,9 +255,39 @@ async def _dispatch_outbox(row_id: int, adapters: dict[str, BotAdapter]) -> bool
                 path = (root / archived.stored_key).resolve()
                 if path.parent != root or not path.is_file():
                     raise ProviderError("missing_document", permanent=True)
-                message_id = await adapter.send_document(
-                    row.chat_id, path, archived.original_name, archived.mime_type, row.body,
-                )
+                args = (row.chat_id, path, archived.original_name, archived.mime_type, row.body)
+                options = {"keyboard": row.keyboard} if row.keyboard else {}
+                message_id = await adapter.send_document(*args, **options)
+            elif operation in {"final_file", "review_file"}:
+                artifact = await session.get(ProjectDeliveryFile, (transcript.metadata_json or {}).get("delivery_file_id")) if transcript else None
+                delivery = await session.get(ProjectDelivery, artifact.delivery_id) if artifact else None
+                project = await session.get(Project, delivery.project_id) if delivery else None
+                if not project or not conversation:
+                    raise ProviderError("missing_delivery", permanent=True)
+                if operation == "review_file":
+                    reviewer = await session.get(AdminUser, conversation.admin_id) if conversation.admin_id else None
+                    if (project.archived_at or delivery.status != "pending" or not reviewer or not reviewer.active
+                            or not has_permission(reviewer.role, "projects.manage")):
+                        raise ProviderError("review_not_allowed", permanent=True)
+                elif (conversation.admin_id is not None or project.customer_id != conversation.customer_id
+                      or project.conversation_id != row.conversation_id or project.status != "completed"
+                      or delivery.status != "approved"):
+                    raise ProviderError("unapproved_delivery", permanent=True)
+                message_id = None
+                if artifact.source_platform == row.platform and artifact.source_file_id:
+                    try:
+                        message_id = await adapter.reuse_document(row.chat_id, artifact.source_file_id, row.body)
+                    except ProviderError as exc:
+                        if not exc.permanent:
+                            raise
+                if not message_id:
+                    root = settings.uploads_dir.resolve()
+                    path = (root / artifact.stored_key).resolve()
+                    if path.parent != root or not path.is_file() or not re.fullmatch(r"[a-f0-9]{32}", artifact.stored_key):
+                        raise ProviderError("missing_document", permanent=True)
+                    message_id = await adapter.send_document(
+                        row.chat_id, path, artifact.original_name, artifact.mime_type, row.body,
+                    )
             elif operation == "edit":
                 if not message_id:
                     raise ProviderError("missing_edit_target", permanent=True)
@@ -285,7 +329,7 @@ async def _dispatch_outbox(row_id: int, adapters: dict[str, BotAdapter]) -> bool
                 meta = dict(transcript.metadata_json or {})
                 meta["delivery_status"] = "sent"
                 transcript.metadata_json = meta
-                if operation in {"send", "edit", "document"}:
+                if operation in {"send", "edit", "document", "final_file", "review_file"}:
                     if transcript.provider_message_id != message_id and message_id:
                         current_revision = await session.scalar(select(func.max(ConversationMessage.revision)).where(
                             ConversationMessage.conversation_id == transcript.conversation_id,
@@ -311,8 +355,6 @@ async def _dispatch_outbox(row_id: int, adapters: dict[str, BotAdapter]) -> bool
             permanent = isinstance(exc, ProviderError) and exc.permanent
             retry_after = exc.retry_after if isinstance(exc, ProviderError) else None
             _defer_outbox(session, row, type(exc).__name__, _retry_seconds(row.attempts, retry_after), permanent=permanent)
-            if transcript and operation == "review_del" and message_id:
-                transcript.deleted_from_chat = True
             if transcript and row.operation != "review_del":
                 meta = dict(transcript.metadata_json or {})
                 meta["delivery_status"] = "failed" if permanent else "retrying"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -96,10 +97,24 @@ class BotAdapter:
         result = await self._api("sendMessage", payload)
         return str(result["message_id"])
 
-    async def send_document(self, chat_id: str, path: Path, filename: str, mime_type: str, caption: str) -> str:
+    async def send_chart(self, chat_id: str, image: bytes, caption: str, keyboard) -> str:
+        result = await self._api("sendPhoto", {
+            "chat_id": chat_id, "caption": caption,
+            "reply_markup": json.dumps({"inline_keyboard": self._keyboard(keyboard)}, ensure_ascii=False),
+        }, files={"photo": ("statistics.png", image, "image/png")})
+        return str(result["message_id"])
+
+    async def reuse_document(self, chat_id: str, file_id: str, caption: str) -> str:
+        result = await self._api("sendDocument", {"chat_id": chat_id, "document": file_id, "caption": caption})
+        return str(result["message_id"])
+
+    async def send_document(self, chat_id: str, path: Path, filename: str, mime_type: str, caption: str, keyboard=None) -> str:
+        payload = {"chat_id": chat_id, "caption": caption}
+        if keyboard:
+            payload["reply_markup"] = json.dumps({"inline_keyboard": self._keyboard(keyboard)}, ensure_ascii=False)
         with path.open("rb") as document:
             result = await self._api(
-                "sendDocument", {"chat_id": chat_id, "caption": caption},
+                "sendDocument", payload,
                 files={"document": (filename, document, mime_type)},
             )
         return str(result["message_id"])
