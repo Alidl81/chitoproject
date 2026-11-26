@@ -29,6 +29,7 @@ MAX_ATTEMPTS = 12
 INBOX_LEASE = timedelta(minutes=5)
 OUTBOX_LEASE = timedelta(minutes=3)
 WORKER_LEASE = timedelta(seconds=90)
+WORKER_LEASE_RETRY_SECONDS = 3
 
 
 def _aware(value: datetime) -> datetime:
@@ -343,11 +344,17 @@ async def run_worker() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     adapters = configured_adapters()
     owner = secrets.token_urlsafe(18)
-    if not await _worker_lease(owner):
-        logger.error("worker lease is already held")
+    try:
+        acquired = await _worker_lease(owner)
+        if not acquired:
+            logger.info("worker lease is held; waiting for it to expire")
+        while not acquired:
+            await asyncio.sleep(WORKER_LEASE_RETRY_SECONDS)
+            acquired = await _worker_lease(owner)
+    except BaseException:
         for adapter in adapters.values():
             await adapter.close()
-        return
+        raise
     stopping = asyncio.Event()
     lost = asyncio.Event()
     heartbeat = asyncio.create_task(_worker_heartbeat(owner, stopping, lost))

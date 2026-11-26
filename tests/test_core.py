@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import select
 
 from app.bot import runtime as bot_runtime
+from app.bot import worker as bot_worker
 from app.bot.files import UploadRejected, register_download
 from app.bot.flow import (
     _button,
@@ -332,6 +333,34 @@ async def test_poller_waits_for_expired_lease_instead_of_exiting(monkeypatch) ->
 
     assert sleep_calls == [bot_runtime.LEASE_RETRY_SECONDS, 1]
     assert adapter.closed
+
+
+@pytest.mark.asyncio
+async def test_worker_waits_for_previous_lease_before_processing(monkeypatch) -> None:
+    lease_attempts = iter((False, True))
+    events: list[str] = []
+
+    async def lease(owner: str, *, release: bool = False) -> bool:
+        events.append("release" if release else "claim")
+        return True if release else next(lease_attempts)
+
+    async def wait(seconds: float) -> None:
+        assert seconds == bot_worker.WORKER_LEASE_RETRY_SECONDS
+        events.append("wait")
+
+    async def process_incoming(adapters) -> int:
+        events.append("process")
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(bot_worker, "configured_adapters", dict)
+    monkeypatch.setattr(bot_worker, "_worker_lease", lease)
+    monkeypatch.setattr(bot_worker.asyncio, "sleep", wait)
+    monkeypatch.setattr(bot_worker, "process_incoming_batch", process_incoming)
+
+    with pytest.raises(asyncio.CancelledError):
+        await bot_worker.run_worker()
+
+    assert events == ["claim", "wait", "claim", "process", "release"]
 
 
 @pytest.mark.asyncio

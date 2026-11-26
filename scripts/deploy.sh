@@ -313,14 +313,14 @@ mv -- "$STAGE_DIR" "$APP_DIR"
 install_app_package
 runuser -u chitoproject -- bash -c "cd '$APP_DIR' && '$VENV_DIR/bin/python' -m app.cli migrate"
 
-for unit in chitoproject-api chitoproject-worker chitoproject-telegram chitoproject-bale; do
-  token_name=""
+systemctl restart chitoproject-api.service chitoproject-worker.service
+for unit in chitoproject-telegram chitoproject-bale; do
   case "$unit" in
     chitoproject-telegram) token_name=TELEGRAM_BOT_TOKEN ;;
     chitoproject-bale) token_name=BALE_BOT_TOKEN ;;
   esac
   has_token=0
-  if [[ -n "$token_name" ]] && python3 - "$ENV_FILE" "$token_name" <<'PY'
+  if python3 - "$ENV_FILE" "$token_name" <<'PY'
 import sys
 
 path, expected = sys.argv[1:]
