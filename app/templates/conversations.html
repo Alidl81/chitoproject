@@ -4,23 +4,25 @@
 {% block content %}
 <section class="panel-card">
   <div class="panel-heading">
-    <div><h2>{{ 'بایگانی گفتگوها' if archived else 'گفتگوها بر اساس نام مشتری' }}</h2><p class="muted">{{ total }} گفتگو</p></div>
+    <div><h2>{{ 'لاگ کامل گفتگوها' if logs else 'بایگانی گفتگوها' if archived else 'گفتگوها بر اساس نام مشتری' }}</h2><p class="muted">{{ total }} گفتگو</p></div>
     <div>
-      <a class="button small secondary" href="/admin/conversations{{ '' if archived else '?archived=1' }}">{{ 'گفتگوهای فعال' if archived else 'بایگانی' }}</a>
+      <a class="button small secondary" href="/admin/conversations{{ '' if logs else '?logs=1' }}">{{ 'گفتگوها' if logs else 'لاگ کامل' }}</a>
+      {% if not logs %}<a class="button small secondary" href="/admin/conversations{{ '' if archived else '?archived=1' }}">{{ 'گفتگوهای فعال' if archived else 'بایگانی' }}</a>{% endif %}
       {% if is_owner %}<a class="button small secondary" href="/admin/broadcasts">پیام همگانی</a>{% endif %}
     </div>
   </div>
   <form method="get" action="/admin/conversations" class="filter-bar">
+    {% if logs %}<input type="hidden" name="logs" value="1">{% endif %}
     {% if archived %}<input type="hidden" name="archived" value="1">{% endif %}
-    <label class="search-field"><span>⌕</span><input name="q" value="{{ search }}" aria-label="نام، نام کاربری یا شناسه" placeholder="جست‌وجوی نام، نام کاربری یا شناسه"></label>
+    <label class="search-field"><span>⌕</span><input name="q" value="{{ search }}" aria-label="نام، نام کاربری یا شناسه" placeholder="{{ 'نام، شناسه یا متن لاگ' if logs else 'نام، نام کاربری یا شناسه' }}"></label>
     <button class="button secondary" type="submit">جست‌وجو</button>
   </form>
   {% if items %}
   <div class="conversation-list">
-    {% for conversation, customer, identity in items %}
-    <a class="conversation-row" href="/admin/conversations/{{ conversation.id }}">
+    {% for conversation, customer, identity, unread in items %}
+    <a class="conversation-row" href="/admin/conversations/{{ conversation.id }}{% if logs %}?logs=1{% if search %}&q={{ search|urlencode }}{% endif %}{% endif %}">
       <span class="conversation-avatar" aria-hidden="true">{{ (customer.display_name or '؟')[0] }}</span>
-      <span class="conversation-main"><b>{{ customer.display_name or 'کاربر بدون نام' }}</b>
+      <span class="conversation-main"><b>{{ customer.display_name or 'کاربر بدون نام' }}</b>{% if unread and not logs %} <span class="status-pill status-submitted" aria-label="{{ unread }} خوانده‌نشده">{{ unread }} جدید</span>{% endif %}
         {% if identity and identity.username %}<small dir="ltr">@{{ identity.username }}</small>{% endif %}
       </span>
       <span class="conversation-meta">
@@ -35,7 +37,7 @@
 </section>
 {% if page_count > 1 %}<div class="pagination">
   <span>صفحهٔ {{ page }} از {{ page_count }}</span>
-  {% if page > 1 %}<a class="button small secondary" href="?page={{ page - 1 }}&q={{ search|urlencode }}{% if archived %}&archived=1{% endif %}">قبلی</a>{% endif %}
-  {% if page < page_count %}<a class="button small secondary" href="?page={{ page + 1 }}&q={{ search|urlencode }}{% if archived %}&archived=1{% endif %}">بعدی</a>{% endif %}
+  {% if page > 1 %}<a class="button small secondary" href="?page={{ page - 1 }}&q={{ search|urlencode }}{% if archived %}&archived=1{% endif %}{% if logs %}&logs=1{% endif %}">قبلی</a>{% endif %}
+  {% if page < page_count %}<a class="button small secondary" href="?page={{ page + 1 }}&q={{ search|urlencode }}{% if archived %}&archived=1{% endif %}{% if logs %}&logs=1{% endif %}">بعدی</a>{% endif %}
 </div>{% endif %}
 {% endblock %}

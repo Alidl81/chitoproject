@@ -19,7 +19,7 @@
         {% if can_projects %}<a href="/admin/projects" class="nav-link {% if current_path.startswith('/admin/projects') %}active{% endif %}"><span>▦</span> پروژه‌ها</a>{% endif %}
         {% if has_customers %}<a href="/admin/conversations" class="nav-link {% if current_path.startswith('/admin/conversations') %}active{% endif %}"><span>◌</span> گفتگوها</a>{% endif %}
         {% if can_team %}<a href="/admin/team" class="nav-link {% if current_path.startswith('/admin/team') %}active{% endif %}"><span>♧</span> تیم و دعوت‌ها</a>{% endif %}
-        {% if can_reports %}<a href="/admin/audit" class="nav-link {% if current_path.startswith('/admin/audit') %}active{% endif %}"><span>◷</span> گزارش فعالیت</a>{% endif %}
+        {% if can_reports %}<a href="/admin/stats" class="nav-link {% if current_path == '/admin/stats' %}active{% endif %}"><span>▥</span> آمار ربات</a><a href="/admin/audit" class="nav-link {% if current_path.startswith('/admin/audit') %}active{% endif %}"><span>◷</span> گزارش فعالیت</a>{% endif %}
       </nav>
       <div class="sidebar-bottom">
         <div class="profile-chip"><span class="avatar">{{ (admin.display_name or admin.username)[0]|upper }}</span><span><b>{{ admin.display_name or admin.username }}</b><small>{{ role_label(admin.role) }}</small></span></div>

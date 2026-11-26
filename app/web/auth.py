@@ -21,6 +21,7 @@ from app.web.common import (
     COOKIE_NAME,
     FORM_CSRF_COOKIE,
     create_session,
+    current_session,
     new_form_csrf,
     redirect,
     render,
@@ -89,6 +90,8 @@ def _set_public_form_cookie(request: Request, response: RedirectResponse, token:
 
 @router.get("/login")
 async def login_page(request: Request, db: AsyncSession = Depends(get_session)):
+    if await current_session(request, db):
+        return RedirectResponse("/admin", status_code=303)
     token = new_form_csrf(request)
     response = render(request, "login.html", notice=request.query_params.get("notice", ""), csrf_token=token)
     set_form_csrf_cookie(response, token)

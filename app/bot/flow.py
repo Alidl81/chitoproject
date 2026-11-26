@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.files import MAX_DOCUMENT_CAPTION, StoredUpload, UploadRejected, register_download
+from app.bot.review import dismiss_previews, record_decision, support_context
 from app.bot.transport import BotAdapter, ProviderError
 from app.config import settings
 from app.models import (
@@ -28,6 +29,7 @@ from app.models import (
 )
 from app.permissions import Role, has_permission
 from app.security import digest_token, now_utc
+from app.stats import bot_stats
 
 logger = logging.getLogger("chitoproject.bot")
 MAX_TEXT_CHARS = 5000
@@ -87,13 +89,15 @@ def _button(
     return value
 
 
-def _home_keyboard(staff: bool = False, can_view_all: bool = False) -> list[list[dict[str, str]]]:
+def _home_keyboard(staff: bool = False, can_view_all: bool = False, can_report: bool = False) -> list[list[dict[str, str]]]:
     if staff:
         if can_view_all:
             rows = [[_button("پروژه‌های من", "a:projects"), _button("صف بررسی", "a:queue")]]
         else:
             rows = [[_button("پروژه‌های من", "a:projects")]]
-        rows.append([_button("ورود به پنل مدیریت", url=f"{settings.public_base_url.rstrip('/')}/admin/login")])
+        if can_report:
+            rows.append([_button("گزارش آماری", "a:stats:1", style="primary")])
+        rows.append([_button("ورود به پنل مدیریت", url=f"{settings.public_base_url.rstrip('/')}/admin")])
         return rows
     return [
         [
@@ -198,10 +202,15 @@ async def _archive_inbound(db: AsyncSession, conversation: Conversation, update:
     provider_id = str(message.get("message_id", "")) or None
     revision = 1
     if edited and provider_id:
-        revision = int(await db.scalar(select(func.max(ConversationMessage.revision)).where(
+        previous = await db.scalar(select(ConversationMessage).where(
             ConversationMessage.conversation_id == conversation.id,
             ConversationMessage.provider_message_id == provider_id,
-        )) or 0) + 1
+        ).order_by(ConversationMessage.revision.desc()).limit(1).with_for_update())
+        if previous:
+            revision = previous.revision + 1
+            for key in ("support_session_id", "support_decision", "support_reason"):
+                if key in (previous.metadata_json or {}):
+                    metadata[key] = previous.metadata_json[key]
     row = ConversationMessage(
         conversation_id=conversation.id, provider_message_id=provider_id, revision=revision,
         direction="inbound", actor_label=_label(user), content=text[:MAX_TEXT_CHARS],
@@ -215,6 +224,9 @@ async def _archive_inbound(db: AsyncSession, conversation: Conversation, update:
 async def _archive_event(db: AsyncSession, conversation: Conversation, user_label: str, content: str,
                          update: dict[str, Any]) -> None:
     metadata = {"update_id": str(update.get("update_id", ""))}
+    callback_data = (update.get("callback_query") or {}).get("data")
+    if callback_data:
+        metadata["callback"] = str(callback_data)[:64]
     if session_id := _support_session_id(conversation):
         metadata["support_session_id"] = session_id
     db.add(ConversationMessage(
@@ -279,46 +291,93 @@ async def _queue_delete(db: AsyncSession, conversation: Conversation, message: C
 async def _queue_staff_notice(db: AsyncSession, identity: PlatformIdentity, admin: AdminUser,
                               project: Project) -> None:
     conversation = await _conversation(db, identity, identity.platform, identity.chat_id)
-    body = f"درخواست تازه ثبت شد\n{project.public_id} · {project.title[:180]}\nبرای بررسی، پنل مدیریت را باز کن."
+    budget = f"{project.budget_toman:,} تومان" if project.budget_toman is not None else "اعلام نشده"
+    body = (f"درخواست تازه · {project.public_id}\n{project.title}\n\n{project.description[:1000]}"
+            f"\n\nزمان: {project.deadline_note or 'اعلام نشده'} · بودجه: {budget}")
+    await _send_review_preview(db, conversation, body, "p", project.id,
+                               f"new-project:{project.id}:{admin.id}:{identity.platform}")
+
+
+async def _send_review_preview(db: AsyncSession, conversation: Conversation, body: str,
+                               kind: str, object_id: str, key: str) -> None:
     message = ConversationMessage(conversation_id=conversation.id, direction="outbound",
                                   actor_label="اعلان تیم", content=body,
-                                  metadata_json={"delivery_status": "queued", "project_id": project.id})
+                                  metadata_json={"delivery_status": "queued"})
     db.add(message)
     await db.flush()
     db.add(OutboxMessage(
-        dedupe_key=f"new-project:{project.id}:{admin.id}:{identity.platform}"[:160],
-        platform=identity.platform, chat_id=identity.chat_id, conversation_id=conversation.id,
-        transcript_message_id=message.id, operation="send", body=body,
-        keyboard=[[_button("بازکردن پنل مدیریت", url=f"{settings.public_base_url.rstrip('/')}/admin/projects/{project.id}")]],
+        dedupe_key=key, platform=conversation.platform, chat_id=conversation.chat_id,
+        conversation_id=conversation.id, transcript_message_id=message.id,
+        operation="send", body=body, keyboard=[[
+            _button("تأیید و بررسی", f"a:{kind}a:{object_id}", style="success"),
+            _button("رد", f"a:{kind}r:{object_id}", style="danger"),
+        ]],
     ))
 
 
-async def _notify_support_team(db: AsyncSession, conversation: Conversation, identity: PlatformIdentity,
-                               update: dict[str, Any]) -> None:
+async def _notify_support_team(db: AsyncSession, conversation: Conversation,
+                               inbound: ConversationMessage) -> None:
     recipients = (await db.execute(
         select(PlatformIdentity, AdminUser)
         .join(AdminUser, AdminUser.id == PlatformIdentity.admin_id)
-        .where(PlatformIdentity.platform == conversation.platform, AdminUser.active.is_(True))
+        .where(AdminUser.active.is_(True))
+        .order_by(PlatformIdentity.platform, PlatformIdentity.id)
     )).all()
-    update_id = str(update.get("update_id", "unknown"))
-    for staff_identity, admin in recipients:
-        if not has_permission(admin.role, "customers.read"):
+    body = f"درخواست پشتیبانی · {inbound.actor_label or 'مشتری'}\n\n{inbound.content[:1000]}"
+    for identity, admin in recipients:
+        if not has_permission(admin.role, "customers.read") or not has_permission(admin.role, "messages.reply"):
             continue
-        staff_conversation = await _conversation(db, staff_identity, staff_identity.platform, staff_identity.chat_id)
-        body = f"پیام تازه برای پیگیری پشتیبانی ثبت شد.\nگفتگوی مشتری: {conversation.id[:8]}"
-        transcript = ConversationMessage(
-            conversation_id=staff_conversation.id, direction="outbound", actor_label="اعلان پشتیبانی",
-            content=body, metadata_json={"delivery_status": "queued", "source_conversation_id": conversation.id},
-        )
-        db.add(transcript)
-        await db.flush()
-        db.add(OutboxMessage(
-            dedupe_key=f"support:{digest_token(f'{conversation.id}:{update_id}:{admin.id}:{conversation.platform}')}",
-            platform=staff_identity.platform, chat_id=staff_identity.chat_id,
-            conversation_id=staff_conversation.id, transcript_message_id=transcript.id,
-            operation="send", body=body,
-            keyboard=[[_button("بازکردن گفتگوی مشتری", url=f"{settings.public_base_url.rstrip('/')}/admin/conversations/{conversation.id}")]],
-        ))
+        chat = await _conversation(db, identity, identity.platform, identity.chat_id)
+        await _send_review_preview(db, chat, body, "s", inbound.id,
+                                   f"support-review:{inbound.id}:{admin.id}:{identity.platform}")
+
+
+async def _decide_preview(db: AsyncSession, staff: AdminUser, kind: str, object_id: str,
+                          accepted: bool, reason: str) -> bool:
+    project = None
+    source = None
+    if kind == "p" and has_permission(staff.role, "projects.review"):
+        project = await db.get(Project, object_id, with_for_update=True)
+        if not project or project.status != "submitted":
+            return False
+        conversation_id = project.conversation_id
+        key = f"new-project:{project.id}"
+    elif kind == "s" and has_permission(staff.role, "customers.read") and has_permission(staff.role, "messages.reply"):
+        source = await db.get(ConversationMessage, object_id, with_for_update=True)
+        if not source or not support_context(source) or (source.metadata_json or {}).get("support_decision"):
+            return False
+        conversation_id = source.conversation_id
+        key = f"support-review:{source.id}"
+    else:
+        return False
+    customer = await db.get(Conversation, conversation_id)
+    if not customer or not customer.customer_id or customer.admin_id is not None:
+        return False
+    if project is not None:
+        project.status = "reviewing" if accepted else "declined"
+        project.updated_at = now_utc()
+        db.add(ProjectEvent(project_id=project.id, actor_type="admin", actor_id=str(staff.id),
+                            event_type="status", note=reason, private=False))
+        text = f"درخواست {project.public_id} {'در حال بررسی است.' if accepted else 'پذیرفته نشد.'}"
+    else:
+        versions = [source]
+        if source.provider_message_id:
+            versions = list(await db.scalars(select(ConversationMessage).where(
+                ConversationMessage.conversation_id == source.conversation_id,
+                ConversationMessage.provider_message_id == source.provider_message_id,
+                ConversationMessage.direction == "inbound",
+            ).order_by(ConversationMessage.revision).with_for_update()))
+        for version in versions:
+            version.metadata_json = {**(version.metadata_json or {}),
+                                     "support_decision": "reviewing" if accepted else "declined",
+                                     "support_reason": reason}
+        text = "پیام پشتیبانی‌ات در حال بررسی است." if accepted else "درخواست پشتیبانی‌ات پذیرفته نشد."
+    if reason:
+        text += f"\nدلیل: {reason}"
+    await queue_customer_message(db, customer, staff, text, f"review-result:{kind}:{object_id}")
+    await dismiss_previews(db, key)
+    record_decision(db, staff.id, "project" if project else "support", object_id, accepted, reason)
+    return True
 
 
 def _callback_description(data: str) -> str:
@@ -340,7 +399,7 @@ def _callback_description(data: str) -> str:
 
 async def _show_home(db: AsyncSession, conversation: Conversation, update: dict[str, Any], *, force_send: bool = False,
                      staff: bool = False, can_view_all: bool = False, notice: str = "",
-                     greeting: str = "") -> None:
+                     greeting: str = "", can_report: bool = False) -> None:
     conversation.state = "home"
     conversation.draft_data = {}
     if notice:
@@ -349,7 +408,7 @@ async def _show_home(db: AsyncSession, conversation: Conversation, update: dict[
         text = "به فضای کاری تیم خوش آمدید. درخواست‌های واگذارشده و صف بررسی از اینجا در دسترس است."
     else:
         text = f"سلام {greeting} 👋 از کجا شروع کنیم؟" if greeting else "سلام 👋 از کجا شروع کنیم؟"
-    await _queue_ui(db, conversation, text, _home_keyboard(staff, can_view_all), update, force_send=force_send)
+    await _queue_ui(db, conversation, text, _home_keyboard(staff, can_view_all, can_report), update, force_send=force_send)
 
 
 async def _finish_admin_link(db: AsyncSession, identity: PlatformIdentity, platform: str, token: str,
@@ -383,7 +442,8 @@ async def _finish_admin_link(db: AsyncSession, identity: PlatformIdentity, platf
 async def _staff_menu(db: AsyncSession, conversation: Conversation, update: dict[str, Any], admin: AdminUser,
                       *, force_send: bool = False, notice: str = "") -> None:
     await _show_home(db, conversation, update, force_send=force_send, staff=True,
-                     can_view_all=has_permission(admin.role, "projects.read"), notice=notice)
+                     can_view_all=has_permission(admin.role, "projects.read"),
+                     can_report=has_permission(admin.role, "reports.read"), notice=notice)
 
 
 async def _project_list(db: AsyncSession, conversation: Conversation, update: dict[str, Any], customer_id: str,
@@ -686,8 +746,8 @@ async def _handle_document(db: AsyncSession, adapter: BotAdapter, conversation: 
         await _queue_ui(db, conversation, f"فایل {len(files)} از {MAX_FILES_PER_PROJECT} به درخواست پیوست شد.\nمی‌توانی فایل دیگری بفرستی یا به مرحلهٔ بعد بروی.",
                         [[_button("افزودن فایل دیگر", "c:stay_file"), _button("ادامه", "c:skip_file")],
                          [_button("لغو درخواست", "c:cancel", style="danger")]], update)
-    elif conversation.state == "support":
-        await _notify_support_team(db, conversation, identity, update)
+    elif conversation.state == "support" and "message" in update:
+        await _notify_support_team(db, conversation, inbound)
         await _queue_ui(db, conversation, f"پیوست «{stored.original_name}» ثبت شد؛ توضیحت را هم همین‌جا بفرست.",
                         _support_keyboard(), update)
     elif conversation.state == "attachment":
@@ -781,7 +841,7 @@ async def handle_update(db: AsyncSession, platform: str, update: dict[str, Any],
                 if conversation.state in {"support", "clear_confirm"}:
                     await _clear_support_messages(db, conversation, update)
                 await _remove_draft_files(conversation)
-            await _show_home(db, conversation, update, staff=bool(staff), can_view_all=bool(staff and has_permission(staff.role, "projects.read")))
+            await _show_home(db, conversation, update, staff=bool(staff), can_view_all=bool(staff and has_permission(staff.role, "projects.read")), can_report=bool(staff and has_permission(staff.role, "reports.read")))
             return
         if data == "c:new" and not staff and conversation.state == "home":
             conversation.state = "discipline"
@@ -871,6 +931,33 @@ async def handle_update(db: AsyncSession, platform: str, update: dict[str, Any],
         if data.startswith("c:project:") and not staff:
             await _project_view(db, conversation, update, data.removeprefix("c:project:"), identity.customer_id)
             return
+        if staff and data in {"a:stats:1", "a:stats:7", "a:stats:30"} and has_permission(staff.role, "reports.read"):
+            days = int(data.rsplit(":", 1)[1])
+            conversation.state = "home"
+            conversation.draft_data = {}
+            rows, total = await bot_stats(db, days)
+            lines = [f"گزارش آماری · کاربران ثبت‌شده: {total}", "تاریخ | شروع‌کننده / ثبت‌کننده پروژه / کاربر جدید"]
+            lines.extend(f"{row['day']} · {row['starts']} / {row['submitters']} / {row['new_users']}" for row in rows)
+            await _queue_ui(db, conversation, "\n".join(lines), [[
+                _button("امروز", "a:stats:1", style="primary"),
+                _button("۷ روز", "a:stats:7"), _button("۳۰ روز", "a:stats:30"),
+            ], [_button("منوی اصلی", "a:home")]], update)
+            return
+        if staff and (match := re.fullmatch(r"a:([ps])([ar]):([a-f0-9-]{36})", data)):
+            kind, action, object_id = match.groups()
+            permitted = has_permission(staff.role, "projects.review") if kind == "p" else (
+                has_permission(staff.role, "customers.read") and has_permission(staff.role, "messages.reply")
+            )
+            if permitted and action == "r":
+                conversation.state = "staff_reject"
+                conversation.draft_data = {"review_kind": kind, "review_id": object_id}
+                await _queue_ui(db, conversation, "دلیل رد را برای ارسال به مشتری بنویسید.",
+                                [[_button("لغو", "a:home")]], update)
+            else:
+                decided = permitted and await _decide_preview(db, staff, kind, object_id, True, "")
+                await _staff_menu(db, conversation, update, staff,
+                                  notice="وضعیت به «در حال بررسی» تغییر کرد." if decided else "این مورد قبلاً بررسی شده یا در دسترس نیست.")
+            return
         if staff and data in {"a:projects", "a:queue"}:
             conversation.state = "home"
             conversation.draft_data = {}
@@ -917,19 +1004,30 @@ async def handle_update(db: AsyncSession, platform: str, update: dict[str, Any],
         await _remove_draft_files(conversation)
         await _show_home(db, conversation, update, staff=bool(staff),
                          can_view_all=bool(staff and has_permission(staff.role, "projects.read")),
-                         notice="فرایند جاری لغو شد.")
+                         can_report=bool(staff and has_permission(staff.role, "reports.read")), notice="فرایند جاری لغو شد.")
+        return
+    if staff and conversation.state == "staff_reject" and "message" in update:
+        reason = message_text.strip()
+        if not reason or reason.startswith("/") or len(reason) > 700:
+            await _queue_ui(db, conversation, "دلیل رد را در حداکثر ۷۰۰ نویسه بنویسید.",
+                            [[_button("لغو", "a:home")]], update)
+            return
+        draft = conversation.draft_data or {}
+        decided = await _decide_preview(db, staff, draft.get("review_kind", ""), draft.get("review_id", ""), False, reason)
+        await _staff_menu(db, conversation, update, staff,
+                          notice="رد شد و دلیل برای مشتری در صف ارسال قرار گرفت." if decided else "این مورد قبلاً بررسی شده یا در دسترس نیست.")
         return
     if staff and conversation.state == "staff_file" and "message" in update:
         await _staff_send_file(db, adapter, staff, conversation, message, update)
         return
     if staff:
         await _queue_ui(db, conversation, "از دکمه‌های منوی همکاران برای مشاهدهٔ پروژه‌ها استفاده کنید.",
-                        _home_keyboard(True, has_permission(staff.role, "projects.read")), update)
+                        _home_keyboard(True, has_permission(staff.role, "projects.read"), has_permission(staff.role, "reports.read")), update)
         return
 
     content = str(message.get("text") or message.get("caption") or "").strip()
-    if conversation.state == "support" and content and not _file_from_message(message):
-        await _notify_support_team(db, conversation, identity, update)
+    if conversation.state == "support" and content and not content.startswith("/") and not _file_from_message(message) and "message" in update:
+        await _notify_support_team(db, conversation, inbound)
         await _queue_ui(db, conversation, "پیامت به تیم رسید؛ پاسخ رو همین‌جا می‌بینی.",
                         _support_keyboard(), update)
         return
@@ -1042,10 +1140,10 @@ async def _create_project(db: AsyncSession, conversation: Conversation, customer
     notified: set[tuple[int, str]] = set()
     staff_rows = (await db.execute(
         select(PlatformIdentity, AdminUser).join(AdminUser, AdminUser.id == PlatformIdentity.admin_id)
-        .where(PlatformIdentity.platform == conversation.platform, AdminUser.active.is_(True))
+        .where(AdminUser.active.is_(True)).order_by(PlatformIdentity.platform, PlatformIdentity.id)
     )).all()
     for staff_identity, staff_member in staff_rows:
-        can_review_all = has_permission(staff_member.role, "projects.read")
+        can_review_all = has_permission(staff_member.role, "projects.review")
         assigned = project.assigned_admin_id == staff_member.id
         if not (can_review_all or assigned):
             continue
@@ -1053,7 +1151,11 @@ async def _create_project(db: AsyncSession, conversation: Conversation, customer
         if key not in notified:
             await _queue_staff_notice(db, staff_identity, staff_member, project)
             notified.add(key)
-    await _archive_event(db, conversation, _label(user), f"درخواست {project.public_id} ثبت شد.", update)
+    db.add(ConversationMessage(
+        conversation_id=conversation.id, direction="event", message_kind="project_submitted",
+        actor_label=_label(user), content=f"درخواست {project.public_id} · {project.title}\n{project.description}",
+        metadata_json={"project_id": project.id},
+    ))
     conversation.state = "home"
     conversation.draft_data = {}
     await _queue_ui(db, conversation,

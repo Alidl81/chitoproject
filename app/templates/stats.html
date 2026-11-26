@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}آمار ربات{% endblock %}
+{% block heading %}آمار ربات{% endblock %}
+{% block content %}
+<section class="panel-card">
+  <div class="panel-heading"><h2>{{ total_users }} کاربر ثبت‌شده</h2></div>
+  <form action="/admin/stats" method="get" class="filter-bar">
+    <label for="since">از</label>
+    <input id="since" name="since" type="date" min="2000-01-01" max="{{ today }}" value="{{ since }}" required>
+    <label for="through">تا</label>
+    <input id="through" name="through" type="date" min="2000-01-01" max="{{ today }}" value="{{ through }}" required>
+    <button class="button secondary">نمایش</button>
+  </form>
+  <p class="muted">بر اساس روز تهران. هر کاربر در هر شاخصِ روزانه یک‌بار شمرده می‌شود. آمار شروع بر پایهٔ لاگ موجود است.</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>روز</th><th>شروع‌کننده</th><th>ثبت‌کنندهٔ پروژه</th><th>کاربر جدید</th></tr></thead>
+      <tbody>
+        {% for row in stats %}<tr>
+          <th scope="row"><bdi>{{ row.day }}</bdi></th>
+          {% for metric, label in [('starts', 'شروع‌کننده'), ('submitters', 'ثبت‌کنندهٔ پروژه'), ('new_users', 'کاربر جدید')] %}
+          <td><progress class="status-progress progress-{{ loop.index }}" max="{{ peak }}" value="{{ row[metric] }}" aria-label="{{ label }} در {{ row.day }}"></progress> {{ row[metric] }}</td>
+          {% endfor %}
+        </tr>{% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

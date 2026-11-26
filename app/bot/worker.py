@@ -255,6 +255,18 @@ async def _dispatch_outbox(row_id: int, adapters: dict[str, BotAdapter]) -> bool
                     sent_id = await adapter.send_message(row.chat_id, row.body, row.keyboard)
                     message_id = sent_id
                     operation = "send"
+            elif operation == "review_del":
+                message_id = transcript.provider_message_id if transcript else None
+                if not message_id:
+                    # The preview send may still be waiting for a provider retry.
+                    original = await session.scalar(select(OutboxMessage).where(
+                        OutboxMessage.transcript_message_id == row.transcript_message_id,
+                        OutboxMessage.operation == "send",
+                    ).limit(1))
+                    if original and original.status in {"pending", "processing"}:
+                        raise ProviderError("preview_send_pending", retry_after=15)
+                elif not await adapter.delete_message(row.chat_id, message_id):
+                    raise ProviderError("delete_not_confirmed", permanent=True)
             elif operation == "delete":
                 if not message_id or not await adapter.delete_message(row.chat_id, message_id):
                     raise ProviderError("delete_not_confirmed", permanent=True)
@@ -267,7 +279,9 @@ async def _dispatch_outbox(row_id: int, adapters: dict[str, BotAdapter]) -> bool
             row.last_error = None
             if row.use_as_ui and conversation and operation in {"send", "edit"}:
                 conversation.ui_message_id = message_id
-            if transcript:
+            if transcript and operation == "review_del" and message_id:
+                transcript.deleted_from_chat = True
+            if transcript and row.operation != "review_del":
                 meta = dict(transcript.metadata_json or {})
                 meta["delivery_status"] = "sent"
                 transcript.metadata_json = meta
@@ -297,7 +311,9 @@ async def _dispatch_outbox(row_id: int, adapters: dict[str, BotAdapter]) -> bool
             permanent = isinstance(exc, ProviderError) and exc.permanent
             retry_after = exc.retry_after if isinstance(exc, ProviderError) else None
             _defer_outbox(session, row, type(exc).__name__, _retry_seconds(row.attempts, retry_after), permanent=permanent)
-            if transcript:
+            if transcript and operation == "review_del" and message_id:
+                transcript.deleted_from_chat = True
+            if transcript and row.operation != "review_del":
                 meta = dict(transcript.metadata_json or {})
                 meta["delivery_status"] = "failed" if permanent else "retrying"
                 transcript.metadata_json = meta

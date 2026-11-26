@@ -98,6 +98,14 @@ class ConversationHidden(Base):
     hidden_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class ConversationRead(Base):
+    __tablename__ = "conversation_read"
+
+    admin_id: Mapped[int] = mapped_column(ForeignKey("admin_users.id", ondelete="CASCADE"), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), primary_key=True)
+    read_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class Broadcast(Base):
     __tablename__ = "broadcasts"
 

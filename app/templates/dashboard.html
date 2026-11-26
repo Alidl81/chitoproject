@@ -4,8 +4,13 @@
 {% block content %}
 <div class="welcome-card">
   <div><p class="eyebrow">مدیریت پروژه‌ها</p><h2>سلام {{ admin.display_name or admin.username }}، به فضای کاری خوش آمدید.</h2><p>درخواست‌ها، گفتگوها و همکاری تیمی از یک پنل قابل پیگیری است.</p></div>
-  <a class="button glass" href="/admin/projects">رفتن به پروژه‌ها <span>←</span></a>
+  {% if can_projects %}<a class="button glass" href="/admin/projects">رفتن به پروژه‌ها <span>←</span></a>{% endif %}
 </div>
+{% if unread is not none %}
+<a class="button secondary" href="/admin/conversations">{{ unread }} پیام و درخواست خوانده‌نشده</a>
+{% endif %}
+{% if can_reports %}<a class="button secondary" href="/admin/stats">گزارش آماری ربات</a>{% endif %}
+{% if can_projects %}
 <div class="stat-grid">
   <article class="stat-card accent-amber"><span class="stat-symbol">◈</span><span class="stat-label">همهٔ درخواست‌ها</span><strong>{{ total }}</strong><small>از ابتدا تا امروز</small></article>
   <article class="stat-card accent-blue"><span class="stat-symbol">◷</span><span class="stat-label">در جریان</span><strong>{{ active_projects }}</strong><small>منتظر بررسی یا اجرا</small></article>
@@ -24,4 +29,5 @@
     {% for status, label in status_labels.items() %}<div class="status-line"><span>{{ label }}</span><progress class="status-progress progress-{{ loop.index }}" max="{{ total if total else 1 }}" value="{{ counts.get(status, 0) }}">{{ counts.get(status, 0) }}</progress><b>{{ counts.get(status, 0) }}</b></div>{% endfor %}
   </section>
 </div>
+{% endif %}
 {% endblock %}

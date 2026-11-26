@@ -480,7 +480,9 @@ async def test_admin_conversation_page_renders_and_csrf_is_enforced(db_context, 
     session.add(conversation)
     await session.flush()
     transcript_message = ConversationMessage(conversation_id=conversation.id, direction="inbound",
-                                             actor_label="مینا", provider_message_id="12", content="سلام")
+                                             actor_label="مینا", provider_message_id="12", content="سلام",
+                                             metadata_json={"support_session_id": "test"})
+    session.add(ConversationMessage(conversation_id=conversation.id, direction="inbound", content="/start"))
     session.add_all([transcript_message, PlatformIdentity(platform="telegram", provider_user_id="88",
                                                           chat_id="88", username="minatest", customer_id=customer.id)])
     await session.flush()
@@ -510,8 +512,17 @@ async def test_admin_conversation_page_renders_and_csrf_is_enforced(db_context, 
             assert f"/admin/conversations/{conversation.id}" in (
                 await client.get("/admin/conversations", params={"q": "@minatest"})
             ).text
+            assert "1 جدید" in response.text
+            assert "1 پیام و درخواست خوانده‌نشده" in (await client.get("/admin")).text
+            assert (await client.get("/admin/login")).headers["location"] == "/admin"
+            assert "/start" in (await client.get(f"/admin/conversations/{conversation.id}?logs=1&q=%2Fstart")).text
+            assert f"/admin/conversations/{conversation.id}" in (await client.get("/admin/conversations?logs=1&q=%2Fstart")).text
             detail = await client.get(f"/admin/conversations/{conversation.id}")
             assert detail.status_code == 200 and "سلام" in detail.text and "@minatest" in detail.text
+            assert "/start" not in detail.text
+            assert "0 پیام و درخواست خوانده‌نشده" in (await client.get("/admin")).text
+            stats = await client.get("/admin/stats?days=1")
+            assert stats.status_code == 200 and "1 کاربر ثبت‌شده" in stats.text
             assert response.headers["x-frame-options"] == "DENY"
 
             rejected = await client.post("/admin/team/invites", data={"role": "reviewer"})
@@ -605,7 +616,7 @@ def test_roles_and_password_hashing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_support_lands_in_conversations_without_project_access(db_context) -> None:
+async def test_support_dashboard_shows_unread_without_project_access(db_context) -> None:
     from app.database import get_session
     from app.main import app
 
@@ -638,8 +649,8 @@ async def test_support_lands_in_conversations_without_project_access(db_context)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
             client.cookies.set("chitoproject_session", raw_token, path="/admin")
             home = await client.get("/admin", follow_redirects=False)
-            assert home.status_code == 303
-            assert home.headers["location"] == "/admin/conversations"
+            assert home.status_code == 200
+            assert "خوانده‌نشده" in home.text and "پروژه‌های تازه" not in home.text
             inbox = await client.get("/admin/conversations")
             assert inbox.status_code == 200
             assert "مینا" in inbox.text
@@ -787,3 +798,51 @@ async def test_staff_document_requires_project_assignment_and_targets_customer(d
     session.expire_all()
     delivered = await session.scalar(select(ConversationMessage).where(ConversationMessage.provider_message_id == "1234"))
     assert delivered.metadata_json["delivery_status"] == "sent"
+
+
+@pytest.mark.asyncio
+async def test_staff_review_accepts_once_rejects_with_reason_and_dismisses_previews(db_context) -> None:
+    from app.bot.flow import _queue_staff_notice
+
+    db, _ = db_context
+    adapter = FakeAdapter()
+    owner = AdminUser(username="review-owner", password_hash="unused", role=Role.OWNER.value)
+    customer = Customer(display_name="Requester")
+    db.add_all([owner, customer])
+    await db.flush()
+    staff_identity = PlatformIdentity(platform="telegram", provider_user_id="810", chat_id="810", admin_id=owner.id)
+    chat = Conversation(platform="telegram", chat_id="811", customer_id=customer.id, state="support",
+                        draft_data={"support_session_id": "test"})
+    db.add_all([staff_identity, chat, PlatformIdentity(
+        platform="telegram", provider_user_id="811", chat_id="811", customer_id=customer.id,
+    )])
+    await db.flush()
+    project = Project(public_id="CP-REVIEW", customer_id=customer.id, conversation_id=chat.id,
+                      title="Preview title", description="Preview description")
+    db.add(project)
+    await db.flush()
+    await _queue_staff_notice(db, staff_identity, owner, project)
+    preview = await db.scalar(select(OutboxMessage).where(OutboxMessage.dedupe_key.startswith("new-project:")))
+    assert "Preview description" in preview.body
+    preview.status = "sent"
+    notice = await db.get(ConversationMessage, preview.transcript_message_id)
+    notice.provider_message_id = "123"
+    await handle_update(db, "telegram", _callback_update(962, 810, f"a:pa:{project.id}"), adapter)
+    await handle_update(db, "telegram", _callback_update(963, 810, f"a:pa:{project.id}"), adapter)
+    assert project.status == "reviewing"
+    assert len(list(await db.scalars(select(OutboxMessage).where(OutboxMessage.operation == "review_del")))) == 1
+    assert len(list(await db.scalars(select(OutboxMessage).where(OutboxMessage.dedupe_key.startswith("review-result:p:"))))) == 1
+
+    await handle_update(db, "telegram", _message_update(964, 811, "Support question"), adapter)
+    await db.flush()
+    source = await db.scalar(select(ConversationMessage).where(ConversationMessage.content == "Support question",
+                                                                ConversationMessage.direction == "inbound"))
+    preview = await db.scalar(select(OutboxMessage).where(OutboxMessage.dedupe_key.startswith("support-review:")))
+    assert "Support question" in preview.body
+    await handle_update(db, "telegram", _callback_update(965, 810, f"a:sr:{source.id}"), adapter)
+    assert not source.metadata_json.get("support_decision")
+    await handle_update(db, "telegram", _message_update(966, 810, "Please send your project number"), adapter)
+    assert source.metadata_json["support_decision"] == "declined"
+    assert preview.status == "canceled"
+    reply = await db.scalar(select(OutboxMessage).where(OutboxMessage.dedupe_key.startswith("review-result:s:")))
+    assert reply.chat_id == "811" and "Please send your project number" in reply.body

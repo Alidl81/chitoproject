@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from datetime import timedelta
+from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
@@ -21,6 +21,7 @@ from app.bot.files import (
 )
 from app.bot.flow import document_budget
 from app.bot.flow import queue_customer_message as _queue_customer_message
+from app.bot.review import dismiss_previews
 from app.config import settings
 from app.database import get_session
 from app.models import (
@@ -35,6 +36,7 @@ from app.models import (
     ConversationFile,
     ConversationHidden,
     ConversationMessage,
+    ConversationRead,
     Customer,
     OutboxMessage,
     PlatformIdentity,
@@ -52,6 +54,8 @@ from app.security import (
     random_token,
     verify_password,
 )
+from app.stats import bot_stats, tehran_today
+from app.web.chat_queries import important_history, unread_messages
 from app.web.common import current_session, redirect, render, valid_session_csrf
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -158,13 +162,15 @@ async def dashboard(request: Request, db: AsyncSession = Depends(get_session)):
     if not isinstance(guard, tuple):
         return guard
     admin, auth = guard
-    if not (has_permission(admin.role, "projects.read")
-            or has_permission(admin.role, "projects.assigned.read")):
-        if has_permission(admin.role, "customers.read"):
-            return RedirectResponse("/admin/conversations", status_code=303)
+    project_access = has_permission(admin.role, "projects.read") or has_permission(admin.role, "projects.assigned.read")
+    chat_access = has_permission(admin.role, "customers.read")
+    if not project_access and not chat_access:
         return _page(request, "error.html", admin, auth, status_code=403,
                      title="دسترسی مجاز نیست", message="برای حساب شما بخش مدیریتی فعالی تعریف نشده است.")
+    unread = int(await db.scalar(unread_messages(admin.id)) or 0) if chat_access else None
     scope = [Project.assigned_admin_id == admin.id] if admin.role == Role.CONTRIBUTOR.value else []
+    if not project_access:
+        scope = [Project.id.is_(None)]
     total = int(await db.scalar(select(func.count(Project.id)).where(*scope)) or 0)
     counts = {status: int(await db.scalar(select(func.count(Project.id)).where(Project.status == status, *scope)) or 0)
               for status in STATUS_LABELS}
@@ -175,7 +181,28 @@ async def dashboard(request: Request, db: AsyncSession = Depends(get_session)):
     members = int(await db.scalar(select(func.count(AdminUser.id)).where(AdminUser.active.is_(True))) or 0) if has_permission(admin.role, "team.invite") else None
     return _page(request, "dashboard.html", admin, auth, total=total, counts=counts,
                  active_projects=active_projects, total_customers=total_customers,
-                 recent=recent, status_labels=STATUS_LABELS, members=members)
+                 recent=recent, status_labels=STATUS_LABELS, members=members, unread=unread)
+
+
+@router.get("/stats")
+async def stats_page(request: Request, db: AsyncSession = Depends(get_session),
+                     days: int = 7, since: date | None = None, through: date | None = None):
+    guard = await _guard(request, db, "reports.read")
+    if not isinstance(guard, tuple):
+        return guard
+    admin, auth = guard
+    today = tehran_today()
+    through = through or today
+    if through.year < 2000:
+        return redirect("/admin/stats", "stats-invalid-range")
+    if since is None:
+        since = through - timedelta(days=max(1, min(days, 90)) - 1)
+    days = (through - since).days + 1
+    if through > today or since.year < 2000 or not 1 <= days <= 90:
+        return redirect("/admin/stats", "stats-invalid-range")
+    rows, total = await bot_stats(db, days, through)
+    peak = max((max(row["starts"], row["submitters"], row["new_users"]) for row in rows), default=0)
+    return _page(request, "stats.html", admin, auth, stats=rows, total_users=total, since=since, through=through, today=today, peak=max(1, peak))
 
 
 @router.get("/projects")
@@ -215,7 +242,7 @@ async def project_detail(project_id: str, request: Request, db: AsyncSession = D
     customer = await db.get(Customer, project.customer_id)
     conversation = await db.get(Conversation, project.conversation_id)
     transcript = list((await db.scalars(select(ConversationMessage).where(
-        ConversationMessage.conversation_id == project.conversation_id).order_by(
+        ConversationMessage.conversation_id == project.conversation_id, important_history()).order_by(
             ConversationMessage.created_at.desc(), ConversationMessage.revision.desc()).limit(300))).all())
     transcript.reverse()
     events = list((await db.scalars(select(ProjectEvent).where(ProjectEvent.project_id == project.id)
@@ -243,7 +270,7 @@ async def project_status(project_id: str, request: Request, db: AsyncSession = D
             return guard
         return guard
     admin, auth = guard
-    project = await _project_scope(db, admin, project_id)
+    project = await db.get(Project, project_id, with_for_update=True)
     if not project:
         return _page(request, "error.html", admin, auth, status_code=404, title="پروژه پیدا نشد", message="این پروژه در دسترس نیست.")
     allowed = STATUS_TRANSITIONS.get(project.status, set())
@@ -262,6 +289,8 @@ async def project_status(project_id: str, request: Request, db: AsyncSession = D
         if note.strip():
             text += f"\n\nیادداشت تیم: {note.strip()[:700]}"
         await _queue_customer_message(db, conversation, admin, text, f"status:{project.id}:{old}:{target}:{int(now_utc().timestamp())}")
+    if old == "submitted":
+        await dismiss_previews(db, f"new-project:{project.id}")
     _audit(db, admin, "project.status", "project", project.id, {"from": old, "to": target})
     await db.commit()
     return redirect(f"/admin/projects/{project.id}", "status-saved")
@@ -352,6 +381,10 @@ async def project_note(project_id: str, request: Request, db: AsyncSession = Dep
     return redirect(f"/admin/projects/{project.id}", "note-saved")
 
 
+def _escaped_search(value: str) -> str:
+    return value.replace("/", "//").replace("%", "/%").replace("_", "/_")
+
+
 def _conversation_identity():
     return (
         select(PlatformIdentity.id)
@@ -367,14 +400,15 @@ def _conversation_identity():
 
 @router.get("/conversations")
 async def conversations_page(request: Request, db: AsyncSession = Depends(get_session),
-                             q: str = "", page: int = 1, archived: bool = False):
+                             q: str = "", page: int = 1, archived: bool = False, logs: bool = False):
     guard = await _guard(request, db, "customers.read")
     if not isinstance(guard, tuple):
         return guard
     admin, auth = guard
     search = q.strip()[:80]
     query = (
-        select(Conversation, Customer, PlatformIdentity)
+        select(Conversation, Customer, PlatformIdentity,
+               unread_messages(admin.id, conversation_id=Conversation.id).correlate(Conversation).scalar_subquery())
         .join(Customer, Customer.id == Conversation.customer_id)
         .outerjoin(PlatformIdentity, PlatformIdentity.id == _conversation_identity())
         .outerjoin(ConversationHidden, and_(
@@ -386,13 +420,21 @@ async def conversations_page(request: Request, db: AsyncSession = Depends(get_se
         and_(Conversation.panel_hidden_at.is_not(None), Conversation.panel_hidden_at >= Conversation.updated_at),
         and_(ConversationHidden.hidden_at.is_not(None), ConversationHidden.hidden_at >= Conversation.updated_at),
     )
-    query = query.where(hidden if archived else ~hidden)
+    if not logs:
+        query = query.where(hidden if archived else ~hidden)
     if search:
         term = search.lstrip("@").replace("/", "//").replace("%", "/%").replace("_", "/_")
         needle = f"%{term}%"
-        query = query.where(or_(*(column.ilike(needle, escape="/") for column in (
+        matches = [column.ilike(needle, escape="/") for column in (
             Customer.display_name, PlatformIdentity.username, PlatformIdentity.provider_user_id, Conversation.chat_id,
-        ))))
+        )]
+        if logs:
+            raw = "%" + _escaped_search(search) + "%"
+            matches.append(select(ConversationMessage.id).where(
+                ConversationMessage.conversation_id == Conversation.id,
+                ConversationMessage.content.ilike(raw, escape="/"),
+            ).correlate(Conversation).exists())
+        query = query.where(or_(*matches))
     total = int(await db.scalar(select(func.count()).select_from(query.subquery())) or 0)
     page_count = max(1, (total + 29) // 30)
     page = min(max(page, 1), page_count)
@@ -401,7 +443,7 @@ async def conversations_page(request: Request, db: AsyncSession = Depends(get_se
         .offset((page - 1) * 30).limit(30)
     )).all()
     return _page(request, "conversations.html", admin, auth, items=items, total=total, page=page,
-                 page_count=page_count, search=search, archived=archived, is_owner=admin.role == Role.OWNER.value)
+                 page_count=page_count, search=search, archived=archived, logs=logs, is_owner=admin.role == Role.OWNER.value)
 
 
 @router.post("/conversations/{conversation_id}/hide")
@@ -559,27 +601,44 @@ async def broadcast_submit(request: Request, db: AsyncSession = Depends(get_sess
 
 @router.get("/conversations/{conversation_id}")
 async def conversation_detail(conversation_id: str, request: Request, db: AsyncSession = Depends(get_session),
-                             page: int = 1):
+                             page: int = 1, logs: bool = False, q: str = ""):
     guard = await _guard(request, db, "customers.read")
     if not isinstance(guard, tuple):
         return guard
     admin, auth = guard
-    conversation = await db.get(Conversation, conversation_id)
+    conversation = await db.get(Conversation, conversation_id, with_for_update=not logs and page == 1)
     if not conversation or not conversation.customer_id:
         return _page(request, "error.html", admin, auth, status_code=404, title="گفتگو پیدا نشد", message="این گفتگو در دسترس نیست.")
     project = await db.scalar(select(Project).where(Project.conversation_id == conversation.id).order_by(Project.created_at.desc()))
     if admin.role == Role.CONTRIBUTOR.value and (not project or project.assigned_admin_id != admin.id):
         return _page(request, "error.html", admin, auth, status_code=403, title="دسترسی مجاز نیست", message="این گفتگو به پروژهٔ واگذارشدهٔ شما متصل نیست.")
-    total_messages = int(await db.scalar(select(func.count(ConversationMessage.id)).where(
-        ConversationMessage.conversation_id == conversation.id)) or 0)
-    page_count = max(1, (total_messages + 499) // 500)
+    search = q.strip()[:100] if logs else ""
+    filters = [ConversationMessage.conversation_id == conversation.id]
+    if not logs:
+        filters.append(important_history())
+    elif search:
+        filters.append(ConversationMessage.content.ilike(f"%{_escaped_search(search)}%", escape="/"))
+    shown_at = now_utc()
+    total_messages = int(await db.scalar(select(func.count(ConversationMessage.id)).where(*filters)) or 0)
+    page_count = max(1, (total_messages + 99) // 100)
     page = min(max(page, 1), page_count)
-    messages = list((await db.scalars(select(ConversationMessage).where(
-        ConversationMessage.conversation_id == conversation.id).order_by(
-            ConversationMessage.created_at.desc(), ConversationMessage.revision.desc()).offset((page - 1) * 500).limit(500))).all())
+    messages = list((await db.scalars(select(ConversationMessage).where(*filters).order_by(
+        ConversationMessage.created_at.desc(), ConversationMessage.revision.desc(), ConversationMessage.id.desc()
+    ).offset((page - 1) * 100).limit(100))).all())
     messages.reverse()
     files = list((await db.scalars(select(ConversationFile).where(
-        ConversationFile.conversation_id == conversation.id).order_by(ConversationFile.created_at))).all())
+        ConversationFile.conversation_id == conversation.id,
+        ConversationFile.message_id.in_([message.id for message in messages]),
+    ).order_by(ConversationFile.created_at))).all())
+    mark_read = not logs and page == 1
+    if mark_read:
+        # Serialize updates to this colleague's read marker with the conversation row.
+        await db.execute(select(Conversation.id).where(Conversation.id == conversation.id).with_for_update())
+        marker = await db.get(ConversationRead, (admin.id, conversation.id))
+        if marker is None:
+            db.add(ConversationRead(admin_id=admin.id, conversation_id=conversation.id, read_at=shown_at))
+        else:
+            marker.read_at = shown_at
     customer = await db.get(Customer, conversation.customer_id)
     identity = await db.scalar(select(PlatformIdentity).where(
         PlatformIdentity.customer_id == conversation.customer_id,
@@ -591,10 +650,12 @@ async def conversation_detail(conversation_id: str, request: Request, db: AsyncS
             OutboxMessage.conversation_id == conversation.id, OutboxMessage.dedupe_key.startswith("panel-delete:"),
         ).group_by(OutboxMessage.status)
     )).all())
+    if mark_read:
+        await db.commit()
     return _page(request, "conversation_detail.html", admin, auth,
                  conversation=conversation, customer=customer, identity=identity, remote_removal=remote_removal,
                  project=project, messages=messages, files=files,
-                 page=page, page_count=page_count, total_messages=total_messages,
+                 page=page, page_count=page_count, total_messages=total_messages, logs=logs, search=search,
                  can_delete=admin.role == Role.OWNER.value,
                  can_reply=has_permission(admin.role, "messages.reply"))
 

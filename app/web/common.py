@@ -52,6 +52,7 @@ def notice_label(value: str) -> str:
         "conversation-hidden": "گفتگو فقط در فهرست شما به بایگانی رفت.",
         "conversation-delete-queued": "گفتگو بایگانی شد و حذف پیام‌های قابل پیگیری در صف قرار گرفت.",
         "conversation-no-deletable": "گفتگو بایگانی شد. پیام تازه‌ای برای درخواست حذف پیدا نشد.",
+        "stats-invalid-range": "بازه‌ای معتبر تا امروز و حداکثر ۹۰ روز انتخاب کنید.",
         "broadcast-invalid": "متن یا پیام‌رسان انتخاب‌شده معتبر نیست.",
         "broadcast-empty": "برای پیام‌رسان انتخاب‌شده گیرنده‌ای پیدا نشد.",
         "broadcast-audience-changed": "شمار گیرنده‌ها تغییر کرد. دوباره پیش‌نمایش بگیرید.",
